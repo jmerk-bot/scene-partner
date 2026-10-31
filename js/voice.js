@@ -302,6 +302,17 @@ export function getVoiceProfile(voiceId) {
 // ---------- OpenAI API Key Management ----------
 
 let openAiConfig = { apiKey: '', model: 'gpt-4o-mini-tts', sttModel: 'gpt-4o-mini-transcribe' };
+let lastOpenAiStatus = { active: false, lastModelUsed: '', lastError: '', testedAt: 0 };
+let onVoiceStatusCallback = null;
+
+export function onVoiceStatusChange(fn) {
+  onVoiceStatusCallback = fn;
+}
+
+function setVoiceRuntimeStatus(patch) {
+  lastOpenAiStatus = { ...lastOpenAiStatus, ...patch };
+  onVoiceStatusCallback?.(lastOpenAiStatus);
+}
 
 export function loadVoiceConfig() {
   try {
@@ -314,15 +325,20 @@ export function loadVoiceConfig() {
   return openAiConfig;
 }
 
-export function saveVoiceApiKey(rawKey) {
+export async function saveVoiceApiKey(rawKey) {
   openAiConfig.apiKey = (rawKey || '').trim();
   try {
     localStorage.setItem(OPENAI_KEY_STORAGE, JSON.stringify(openAiConfig));
   } catch (e) {}
+  if (openAiConfig.apiKey) {
+    return testOpenAiVoiceConnection();
+  }
+  return false;
 }
 
 export function clearVoiceApiKey() {
   openAiConfig.apiKey = '';
+  setVoiceRuntimeStatus({ active: false, lastModelUsed: '', lastError: '' });
   try {
     localStorage.removeItem(OPENAI_KEY_STORAGE);
   } catch (e) {}
@@ -332,13 +348,42 @@ export function hasOpenAiKey() {
   return Boolean(openAiConfig.apiKey && openAiConfig.apiKey.length > 12);
 }
 
+export async function testOpenAiVoiceConnection() {
+  if (!hasOpenAiKey()) {
+    setVoiceRuntimeStatus({ active: false, lastError: 'No OpenAI API key saved yet.' });
+    return false;
+  }
+  setVoiceRuntimeStatus({ lastError: 'Testing OpenAI Neural Voice connection…' });
+  try {
+    await speakCharacterLine('Stage voice check: OpenAI neural voice is connected and ready.', VOICE_PROFILES[0], {
+      speed: 1.0,
+      forceOpenAIOnly: true
+    });
+    return true;
+  } catch (err) {
+    setVoiceRuntimeStatus({
+      active: false,
+      lastError: err?.message || 'OpenAI request failed'
+    });
+    return false;
+  }
+}
+
 export function voiceEngineStatus() {
   const hasKey = hasOpenAiKey();
   const hasWebSpeech = typeof window !== 'undefined' && 'speechSynthesis' in window;
   const hasWebStt = typeof window !== 'undefined' && ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window);
   return {
     hasOpenAiKey: hasKey,
-    ttsEngine: hasKey ? 'OpenAI Neural Theatre Voices (with offline fallback)' : (hasWebSpeech ? 'Device Multi-Character Voices (add OpenAI key for Studio Neural Voices)' : 'Text-only'),
+    maskedKey: hasKey ? `${openAiConfig.apiKey.slice(0, 7)}…${openAiConfig.apiKey.slice(-4)}` : '',
+    lastError: lastOpenAiStatus.lastError,
+    lastModelUsed: lastOpenAiStatus.lastModelUsed,
+    active: lastOpenAiStatus.active,
+    ttsEngine: hasKey
+      ? (lastOpenAiStatus.lastError && !lastOpenAiStatus.active
+          ? `⚠️ OpenAI Error (${lastOpenAiStatus.lastError}) — Falling back to Device Voice`
+          : `✨ OpenAI Neural Theatre Voices (${lastOpenAiStatus.lastModelUsed || 'gpt-4o-mini-tts / tts-1-hd'})`)
+      : (hasWebSpeech ? '⚠️ Device Offline Voices (No OpenAI key on this site yet — open Settings to paste your sk-… key)' : 'Text-only'),
     sttEngine: hasKey && hasWebStt
       ? 'Live Karaoke Speech Recognition + OpenAI Whisper Assist'
       : hasKey
@@ -455,7 +500,8 @@ export async function speakCharacterLine(text, voiceProfile = VOICE_PROFILES[0],
   speed = 1.0,
   onWord = null,
   onEnd = null,
-  preferCloud = true
+  preferCloud = true,
+  forceOpenAIOnly = false
 } = {}) {
   stopAllSpeaking();
 
@@ -474,11 +520,56 @@ export async function speakCharacterLine(text, voiceProfile = VOICE_PROFILES[0],
       return;
     } catch (err) {
       if (err?.name === 'AbortError') return;
+      setVoiceRuntimeStatus({
+        active: false,
+        lastError: err?.message || 'OpenAI TTS error'
+      });
+      if (forceOpenAIOnly) throw err;
       // Fall through seamlessly to browser speechSynthesis on network/API error
     }
   }
 
   speakViaBrowser(spokenText, words, voiceProfile, speed, onWord, onEnd);
+}
+
+// Legacy `tts-1-hd` and `tts-1` only support these 6 voices; `gpt-4o-mini-tts` supports all 11.
+const LEGACY_TTS_VOICE_MAP = {
+  ash: 'onyx',
+  ballad: 'echo',
+  coral: 'nova',
+  sage: 'fable'
+};
+
+async function requestOpenAiSpeechBlob(modelName, voiceName, spokenText, instructions, speedNum, signal) {
+  const isMiniTts = modelName.includes('gpt-4o');
+  const safeVoice = isMiniTts ? voiceName : (LEGACY_TTS_VOICE_MAP[voiceName] || voiceName || 'onyx');
+  const payload = {
+    model: modelName,
+    voice: safeVoice,
+    input: spokenText,
+    speed: speedNum,
+    ...(isMiniTts && instructions ? { instructions } : {})
+  };
+
+  const res = await fetch('https://api.openai.com/v1/audio/speech', {
+    method: 'POST',
+    signal,
+    headers: {
+      'Authorization': `Bearer ${openAiConfig.apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload)
+  });
+
+  if (!res.ok) {
+    let errDetail = `HTTP ${res.status}`;
+    try {
+      const errJson = await res.json();
+      if (errJson?.error?.message) errDetail = errJson.error.message;
+    } catch (e) {}
+    throw new Error(errDetail);
+  }
+  return res.blob();
 }
 
 async function speakViaOpenAI(spokenText, words, voiceProfile, speed, onWord, onEnd) {
@@ -489,28 +580,49 @@ async function speakViaOpenAI(spokenText, words, voiceProfile, speed, onWord, on
   activeAbortController = controller;
 
   if (!audioUrl) {
-    const res = await fetch('https://api.openai.com/v1/audio/speech', {
-      method: 'POST',
-      signal: controller.signal,
-      headers: {
-        'Authorization': `Bearer ${openAiConfig.apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: openAiConfig.model || 'gpt-4o-mini-tts',
-        voice: voiceProfile.OpenAIVoice || 'onyx',
-        input: spokenText,
-        instructions: voiceProfile.instructions || 'Speak with clear, expressive theatrical delivery.',
-        speed: Math.min(1.5, Math.max(0.65, speed * (voiceProfile.rate || 1.0)))
-      })
+    const targetSpeed = Math.min(1.5, Math.max(0.65, speed * (voiceProfile.rate || 1.0)));
+    const modelsToTry = ['gpt-4o-mini-tts', 'tts-1-hd', 'tts-1'];
+    let blob = null;
+    let lastErr = null;
+    let succeededModel = '';
+
+    for (const modelName of modelsToTry) {
+      try {
+        blob = await requestOpenAiSpeechBlob(
+          modelName,
+          voiceProfile.OpenAIVoice || 'onyx',
+          spokenText,
+          voiceProfile.instructions || 'Speak with clear, expressive theatrical delivery.',
+          targetSpeed,
+          controller.signal
+        );
+        succeededModel = modelName;
+        break;
+      } catch (e) {
+        if (e?.name === 'AbortError') throw e;
+        lastErr = e;
+        // If 401 Invalid API key or 429 Insufficient Quota, no need to retry other models
+        if (/incorrect api key|invalid_api_key|quota|billing/i.test(e?.message || '')) {
+          break;
+        }
+      }
+    }
+
+    if (!blob) {
+      throw lastErr || new Error('OpenAI TTS failed');
+    }
+
+    setVoiceRuntimeStatus({
+      active: true,
+      lastModelUsed: succeededModel,
+      lastError: '',
+      testedAt: Date.now()
     });
 
-    if (!res.ok) {
-      throw new Error(`OpenAI TTS HTTP ${res.status}`);
-    }
-    const blob = await res.blob();
     audioUrl = URL.createObjectURL(blob);
     ttsAudioCache.set(cacheKey, audioUrl);
+  } else {
+    setVoiceRuntimeStatus({ active: true, lastError: '' });
   }
 
   if (controller.signal.aborted) return;

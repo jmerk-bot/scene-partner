@@ -40,7 +40,9 @@ import {
   hasOpenAiKey,
   saveVoiceApiKey,
   clearVoiceApiKey,
-  voiceEngineStatus
+  voiceEngineStatus,
+  testOpenAiVoiceConnection,
+  onVoiceStatusChange
 } from './voice.js';
 import { getAllPlays, getPlayById, groupPlaysByPlaywright } from './library.js';
 import { extractTextFromPdf, parseScriptText } from './pdf.js';
@@ -564,12 +566,19 @@ export function renderApp() {
 function renderHeaderHtml() {
   const play = getActivePlay();
   const tol = TOLERANCE_LEVELS[state.settings.tolerance] || TOLERANCE_LEVELS['off-book'];
+  const vStatus = voiceEngineStatus();
 
   const themePills = THEME_ORDER.map((key) => {
     const t = THEMES[key];
     const active = state.settings.theme === key ? 'active' : '';
     return `<button class="theme-pill ${active}" data-action="set-theme" data-value="${key}" title="${escHtml(t.desc)}">${escHtml(t.shortLabel)}</button>`;
   }).join('');
+
+  const voiceBadgeHtml = vStatus.hasOpenAiKey
+    ? (vStatus.lastError && !vStatus.active
+        ? `<button class="tolerance-badge-btn voice-warn-pill" data-action="open-settings" data-value="voices" title="${escHtml(vStatus.lastError)}">⚠️ OpenAI Error (Check Key)</button>`
+        : `<button class="tolerance-badge-btn voice-ok-pill" data-action="open-settings" data-value="voices" title="Using OpenAI Neural Voices (${escHtml(vStatus.maskedKey)})">✨ OpenAI Neural Voice</button>`)
+    : `<button class="tolerance-badge-btn voice-offline-pill" data-action="open-settings" data-value="voices" title="Currently using basic browser offline voices. Tap to paste your OpenAI API key for studio voices!">🔈 Offline Voice · Tap to Add OpenAI Key</button>`;
 
   return `
     <div class="header-inner">
@@ -589,6 +598,7 @@ function renderHeaderHtml() {
       </div>
 
       <div class="header-controls">
+        ${voiceBadgeHtml}
         <div class="theme-switcher" role="group" aria-label="Stage view style">
           ${themePills}
         </div>
@@ -1181,21 +1191,24 @@ function renderVoicesSettingsTabHtml() {
     <div class="settings-section">
       <h3>Voice &amp; Transcription Engine</h3>
       <div class="engine-status-box">
-        <p><strong>Voice Production:</strong> ${escHtml(status.ttsEngine)}</p>
+        <p><strong>Active Voice Engine:</strong> ${escHtml(status.ttsEngine)}</p>
+        ${status.hasOpenAiKey ? `<p><strong>Saved Key:</strong> <code>${escHtml(status.maskedKey)}</code> ${status.lastModelUsed ? `(Model: <code>${escHtml(status.lastModelUsed)}</code>)` : ''}</p>` : ''}
+        ${status.lastError ? `<p style="color:#ef4444;font-weight:700;">Diagnostic: ${escHtml(status.lastError)}</p>` : ''}
         <p><strong>Transcription:</strong> ${escHtml(status.sttEngine)}</p>
       </div>
-      <p class="settings-note">Scene Partner works out of the box offline using your tablet’s built-in voices and speech recognizer. For studio-grade neural character voices (<code>gpt-4o-mini-tts</code>) and Whisper transcription, paste an OpenAI API key below (stored only on this device).</p>
+      <p class="settings-note">Note: Each site origin (e.g. <code>localhost</code> vs. <code>jmerk-bot.github.io</code>) has its own browser storage. If you added your OpenAI key on the OpenAI dashboard or on localhost, paste your <code>sk-...</code> key here on the live site (or sync via Cloud Backup) to activate OpenAI Neural Voices.</p>
       <div class="api-key-row">
         <input
           id="openai-api-key"
           class="cloud-input"
           type="password"
-          placeholder="${status.hasOpenAiKey ? 'OpenAI API key saved (paste new key to replace)' : 'OpenAI API Key (sk-...)'}"
+          placeholder="${status.hasOpenAiKey ? `Saved (${status.maskedKey}) — paste new sk-... key to replace` : 'Paste your OpenAI Secret Key here (sk-proj-...)'}"
           autocomplete="off"
           spellcheck="false"
         >
         <div class="cloud-actions">
-          <button class="secondary-btn" data-action="save-openai-key">Save Key</button>
+          <button class="start-rehearsal-btn" style="padding:0.55rem 1.1rem;font-size:0.88rem;" data-action="save-openai-key">Save &amp; Test OpenAI Voice</button>
+          ${status.hasOpenAiKey ? `<button class="secondary-btn" data-action="test-openai-key">🔊 Test OpenAI Voice</button>` : ''}
           ${status.hasOpenAiKey ? `<button class="quiet-btn" data-action="clear-openai-key">Disconnect Key</button>` : ''}
         </div>
       </div>
@@ -1278,6 +1291,12 @@ export function renderCloudStatusInDrawer() {
 
 onCloudStatus(() => {
   if (settingsOpen && settingsTab === 'cloud') renderCloudStatusInDrawer();
+});
+
+onVoiceStatusChange(() => {
+  const headerEl = $('app-header');
+  if (headerEl) headerEl.innerHTML = renderHeaderHtml();
+  if (settingsOpen && settingsTab === 'voices') renderApp();
 });
 
 function renderToggleRow(key, label, desc) {
@@ -1488,17 +1507,28 @@ export const uiActions = {
     settingsTab = tab || 'rehearsal';
     renderApp();
   },
-  'save-openai-key': () => {
+  'save-openai-key': async () => {
     const input = $('openai-api-key');
     const val = input?.value.trim() || '';
     if (val) {
-      saveVoiceApiKey(val);
       input.value = '';
+      await saveVoiceApiKey(val);
+      saveState();
       renderApp();
+    } else if (hasOpenAiKey()) {
+      await testOpenAiVoiceConnection();
+      renderApp();
+    } else {
+      input?.focus();
     }
+  },
+  'test-openai-key': async () => {
+    await testOpenAiVoiceConnection();
+    renderApp();
   },
   'clear-openai-key': () => {
     clearVoiceApiKey();
+    saveState();
     renderApp();
   },
   'cloud-save': () => {

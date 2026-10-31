@@ -300,6 +300,21 @@ html[data-theme="modern"] .screen-tab.active {
   font-weight: 600;
 }
 
+.voice-offline-pill {
+  border-color: #f59e0b;
+  background: rgba(245, 158, 11, 0.14);
+}
+
+.voice-ok-pill {
+  border-color: #10b981;
+  background: rgba(16, 185, 129, 0.14);
+}
+
+.voice-warn-pill {
+  border-color: #ef4444;
+  background: rgba(239, 68, 68, 0.16);
+}
+
 .tol-dot {
   width: 8px;
   height: 8px;

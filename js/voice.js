@@ -124,6 +124,39 @@ export const VOICE_PROFILES = [
     rate: 0.95,
     color: '#38bdf8',
     instructions: 'Speak with a poetic, musical, theatrical storytelling delivery.'
+  },
+  {
+    id: 'verse',
+    name: 'Verse',
+    OpenAIVoice: 'verse',
+    archetype: 'Dynamic Stage Actor · Mercurial Wits & Courtiers',
+    gender: 'male',
+    pitch: 1.01,
+    rate: 0.98,
+    color: '#818cf8',
+    instructions: 'Speak with a dynamic, expressive, classical stage actor delivery.'
+  },
+  {
+    id: 'marin',
+    name: 'Marin',
+    OpenAIVoice: 'marin',
+    archetype: 'Crisp Modern Lead · Contemporary & Realist Drama',
+    gender: 'female',
+    pitch: 1.05,
+    rate: 0.98,
+    color: '#fb7185',
+    instructions: 'Speak with a natural, deeply human, emotionally nuanced theatrical delivery.'
+  },
+  {
+    id: 'cedar',
+    name: 'Cedar',
+    OpenAIVoice: 'cedar',
+    archetype: 'Rich Character Actor · Grounded Drama & Classics',
+    gender: 'male',
+    pitch: 0.90,
+    rate: 0.95,
+    color: '#a3e635',
+    instructions: 'Speak with a warm, grounded, natural character-actor voice.'
   }
 ];
 
@@ -537,7 +570,10 @@ const LEGACY_TTS_VOICE_MAP = {
   ash: 'onyx',
   ballad: 'echo',
   coral: 'nova',
-  sage: 'fable'
+  sage: 'fable',
+  verse: 'fable',
+  marin: 'shimmer',
+  cedar: 'onyx'
 };
 
 async function requestOpenAiSpeechBlob(modelName, voiceName, spokenText, instructions, speedNum, signal) {

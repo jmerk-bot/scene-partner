@@ -1,0 +1,6 @@
+.DS_Store
+_site/
+CLAUDE.local.md
+.claude/settings.local.json
+improvements.md
+journey*.md

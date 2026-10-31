@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en" data-theme="shakespearean">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0c0a09">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Scene Partner">
+  <title>Scene Partner — Off-Book Line Rehearsal</title>
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" type="image/svg+xml" href="./icons/icon.svg">
+  <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="./css/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header id="app-header" class="app-header"></header>
+    <main id="app-main" class="app-main"></main>
+    <footer class="app-footer">
+      <span>Scene Partner · Off-Book Line &amp; Voice Rehearsal Studio</span>
+      <span id="app-version" class="app-version">dev</span>
+    </footer>
+  </div>
+
+  <!-- Settings & Green Room Drawer -->
+  <div id="settings-drawer" class="settings-drawer" hidden></div>
+
+  <!-- Modals (Paste Sides, Curtain Call) -->
+  <div id="modal-layer" class="modal-layer" hidden></div>
+
+  <!-- Hidden File Pickers -->
+  <input id="pdf-file-input" type="file" accept=".pdf,.txt,.fountain,application/pdf,text/plain" hidden>
+  <input id="backup-file-input" type="file" accept=".json,application/json" hidden>
+
+  <script type="module" src="./js/main.js"></script>
+</body>
+</html>

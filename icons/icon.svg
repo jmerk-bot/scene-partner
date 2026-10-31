@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="35%" r="70%">
+      <stop offset="0%" stop-color="#291d18"/>
+      <stop offset="100%" stop-color="#0c0a09"/>
+    </radialGradient>
+    <linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f6d365"/>
+      <stop offset="50%" stop-color="#d4af37"/>
+      <stop offset="100%" stop-color="#9a7418"/>
+    </linearGradient>
+    <linearGradient id="parchment" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#fdf6e2"/>
+      <stop offset="100%" stop-color="#e5d3a7"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <rect x="24" y="24" width="464" height="464" rx="92" fill="none" stroke="url(#gold)" stroke-width="5" opacity="0.55"/>
+  <!-- Spotlight beams -->
+  <polygon points="256,40 90,440 422,440" fill="url(#gold)" opacity="0.08"/>
+  <!-- Open Folio / Script Book -->
+  <g transform="translate(0, 12)">
+    <path d="M96 150 C160 135, 224 148, 256 170 C288 148, 352 135, 416 150 L416 365 C352 350, 288 363, 256 385 C224 363, 160 350, 96 365 Z" fill="url(#parchment)" stroke="url(#gold)" stroke-width="8" stroke-linejoin="round"/>
+    <line x1="256" y1="170" x2="256" y2="385" stroke="#8c6d23" stroke-width="5" stroke-linecap="round"/>
+    <!-- Left page script lines -->
+    <rect x="128" y="196" width="96" height="10" rx="5" fill="#7c2d12" opacity="0.85"/>
+    <rect x="128" y="222" width="84" height="8" rx="4" fill="#44403c" opacity="0.65"/>
+    <rect x="128" y="244" width="92" height="8" rx="4" fill="#44403c" opacity="0.65"/>
+    <rect x="128" y="274" width="76" height="10" rx="5" fill="#b45309"/>
+    <rect x="128" y="298" width="94" height="8" rx="4" fill="#b45309" opacity="0.8"/>
+    <rect x="128" y="320" width="68" height="8" rx="4" fill="#b45309" opacity="0.8"/>
+    <!-- Right page microphone / voice wave -->
+    <rect x="316" y="194" width="44" height="72" rx="22" fill="url(#gold)" stroke="#5c4010" stroke-width="4"/>
+    <path d="M300 238 A38 38 0 0 0 376 238" fill="none" stroke="#7c2d12" stroke-width="8" stroke-linecap="round"/>
+    <line x1="338" y1="276" x2="338" y2="310" stroke="#7c2d12" stroke-width="8" stroke-linecap="round"/>
+    <line x1="312" y1="310" x2="364" y2="310" stroke="#7c2d12" stroke-width="8" stroke-linecap="round"/>
+  </g>
+</svg>

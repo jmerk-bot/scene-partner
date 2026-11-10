@@ -5,7 +5,14 @@
 // (`scene-partner:cloud:v1`) so both apps can use the same GitHub Personal Access Token
 // without ever overwriting each other's state.
 
-import { state, serializeState, applySavedState, saveState } from './state.js';
+import {
+  state,
+  serializeState,
+  serializeStateForCloud,
+  restoreCloudVoiceVault,
+  applySavedState,
+  saveState
+} from './state.js';
 
 const CLOUD_KEY = 'scene-partner:cloud:v1';
 const GIST_FILENAME = 'scene-partner-state.json';
@@ -155,19 +162,25 @@ export async function syncWithCloud({ restoreIfAhead = false, keepalive = false 
     if (restoreIfAhead && config.gistId) {
       const cloudData = await fetchGistState(config.token, config.gistId);
       const localData = serializeState();
-      if (cloudData && isCloudAhead(localData, cloudData)) {
-        if (applySavedState(cloudData)) {
-          saveState({ touch: false });
-          config.lastSyncAt = Date.now();
-          saveConfig();
+      if (cloudData) {
+        const keyRestored = await restoreCloudVoiceVault(cloudData, config.token);
+        if (isCloudAhead(localData, cloudData)) {
+          if (applySavedState(cloudData)) {
+            saveState({ touch: false });
+            config.lastSyncAt = Date.now();
+            saveConfig();
+            onRestoreCallback?.();
+            setStatus('ok', 'Restored latest scripts & rehearsal state from cloud');
+            return true;
+          }
+        } else if (keyRestored) {
           onRestoreCallback?.();
-          setStatus('ok', 'Restored latest scripts & rehearsal state from cloud');
-          return true;
         }
       }
     }
 
-    await pushGistState(config.token, config.gistId, serializeState(), { keepalive });
+    const cloudPayload = await serializeStateForCloud(config.token);
+    await pushGistState(config.token, config.gistId, cloudPayload, { keepalive });
     config.lastSyncAt = Date.now();
     saveConfig();
     setStatus('ok', 'Saved to cloud');
@@ -182,8 +195,11 @@ export async function syncWithCloud({ restoreIfAhead = false, keepalive = false 
 }
 
 export async function setCloudToken(rawToken) {
-  const token = (rawToken || '').trim();
-  if (!token) return false;
+  const token = String(rawToken || '').replace(/[\r\n\t\s]/g, '');
+  if (!token || !/^[\x21-\x7E]{12,260}$/.test(token)) {
+    setStatus('error', 'Invalid GitHub token format');
+    return false;
+  }
   if (token !== config.token) {
     config.token = token;
     config.gistId = null;

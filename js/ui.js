@@ -12,6 +12,7 @@ import {
   THEMES,
   THEME_ORDER,
   CUE_VISIBILITY_MODES,
+  isSafeObjectKey,
   logRehearsalSession,
   backupCopy,
   readBackup,
@@ -46,7 +47,7 @@ import {
   onVoiceStatusChange
 } from './voice.js';
 import { getAllPlays, getPlayById, groupPlaysByPlaywright } from './library.js';
-import { extractTextFromPdf, parseScriptText } from './pdf.js';
+import { extractTextFromPdf, parseScriptText, MAX_PDF_BYTES, MAX_TEXT_BYTES } from './pdf.js';
 import { cloudStatus, onCloudStatus, setCloudToken, clearCloudToken, syncWithCloud } from './cloud.js';
 
 const $ = (id) => document.getElementById(id);
@@ -81,7 +82,12 @@ export function escHtml(str) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function safeCssColor(color) {
+  return typeof color === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(color) ? color : '#9ca3af';
 }
 
 export function getActivePlay() {
@@ -190,7 +196,8 @@ export function selectScene(sceneId) {
 }
 
 export function setCharacterVoice(charName, voiceId) {
-  if (!charName || !voiceId) return;
+  if (!charName || !voiceId || !isSafeObjectKey(charName)) return;
+  if (!VOICE_PROFILES.some((v) => v.id === voiceId)) return;
   state.voiceOverrides[charName] = voiceId;
   saveState();
   const profile = getVoiceProfile(voiceId);
@@ -574,16 +581,21 @@ function scrollActiveLineIntoView() {
 
 export async function handleUploadedScriptFile(file) {
   if (!file) return;
-  statusNotice = `Reading "${file.name}"…`;
+  const isPdf = /\.pdf$/i.test(file.name) || file.type === 'application/pdf';
+  const maxBytes = isPdf ? MAX_PDF_BYTES : MAX_TEXT_BYTES;
+  if (typeof file.size === 'number' && file.size > maxBytes) {
+    statusNotice = `File is too large (${Math.round(file.size / (1024 * 1024))} MB). Maximum allowed is ${Math.round(maxBytes / (1024 * 1024))} MB.`;
+    renderApp();
+    return;
+  }
+
+  statusNotice = `Reading "${file.name.slice(0, 80)}"…`;
   renderApp();
 
   try {
-    let rawText = '';
-    if (/\.pdf$/i.test(file.name) || file.type === 'application/pdf') {
-      rawText = await extractTextFromPdf(file);
-    } else {
-      rawText = await file.text();
-    }
+    const rawText = isPdf
+      ? await extractTextFromPdf(file)
+      : await file.text();
 
     const parsedPlay = parseScriptText(rawText, {
       defaultTitle: file.name.replace(/\.(pdf|txt|fountain)$/i, ''),
@@ -596,11 +608,11 @@ export async function handleUploadedScriptFile(file) {
       return;
     }
 
-    state.customPlays = [parsedPlay, ...state.customPlays.filter((p) => p.title !== parsedPlay.title)];
+    state.customPlays = [parsedPlay, ...state.customPlays.filter((p) => p.title !== parsedPlay.title)].slice(0, 25);
     statusNotice = '';
     selectPlay(parsedPlay.id);
   } catch (e) {
-    statusNotice = `Could not parse "${file.name}". You can also paste script sides directly.`;
+    statusNotice = `Could not parse "${file.name.slice(0, 80)}". You can also paste script sides directly.`;
     renderApp();
   }
 }
@@ -894,9 +906,11 @@ function renderSetupScreenHtml() {
   const tol = TOLERANCE_LEVELS[state.settings.tolerance] || TOLERANCE_LEVELS['off-book'];
 
   // Count lines per character in the selected scene AND across the play
-  const sceneCounts = {};
+  const sceneCounts = Object.create(null);
   for (const l of scene.lines) {
-    sceneCounts[l.speaker] = (sceneCounts[l.speaker] || 0) + 1;
+    if (isSafeObjectKey(l.speaker)) {
+      sceneCounts[l.speaker] = (sceneCounts[l.speaker] || 0) + 1;
+    }
   }
 
   const sceneCards = play.scenes.map((sc) => {
@@ -933,7 +947,7 @@ function renderSetupScreenHtml() {
             <span class="user-mic-tag">🎙️ You read these lines into the microphone</span>
           ` : `
             <label class="voice-select-label">
-              <span class="voice-dot" style="background:${assignedVoice.color}"></span>
+              <span class="voice-dot" style="background:${safeCssColor(assignedVoice.color)}"></span>
               <select class="voice-select" data-char-voice="${escHtml(charName)}" aria-label="Voice for ${escHtml(charName)}">
                 ${voiceOptions}
               </select>
@@ -1200,7 +1214,7 @@ function renderKaraokeFocusInnerHtml(currentLine, currentIdx, userTurn, voiceMap
   return `
     <div class="focus-header">
       <div class="speaker-banner">
-        <span class="role-badge partner-cue-badge" style="border-color:${profile.color};color:${profile.color}">
+        <span class="role-badge partner-cue-badge" style="border-color:${safeCssColor(profile.color)};color:${safeCssColor(profile.color)}">
           🔊 ${escHtml(profile.name)} Voice
         </span>
         <h2 class="focus-speaker">${escHtml(formatSpeakerName(currentLine.speaker))}</h2>
@@ -1232,7 +1246,7 @@ function renderScriptLineCardHtml(line, idx, currentIdx, voiceMap) {
       data-value="${idx}"
     >
       <div class="line-card-header">
-        <span class="line-speaker" style="${!isMine ? `color:${profile.color}` : ''}">
+        <span class="line-speaker" style="${!isMine ? `color:${safeCssColor(profile.color)}` : ''}">
           ${escHtml(formatSpeakerName(line.speaker))}
         </span>
         <span class="line-badges">
@@ -1398,13 +1412,13 @@ function renderVoicesSettingsTabHtml() {
         ${status.lastError ? `<p style="color:#ef4444;font-weight:700;">Diagnostic: ${escHtml(status.lastError)}</p>` : ''}
         <p><strong>Transcription:</strong> ${escHtml(status.sttEngine)}</p>
       </div>
-      <p class="settings-note">Note: Each site origin (e.g. <code>localhost</code> vs. <code>jmerk-bot.github.io</code>) has its own browser storage. If you added your OpenAI key on the OpenAI dashboard or on localhost, paste your <code>sk-...</code> key here on the live site (or sync via Cloud Backup) to activate OpenAI Neural Voices.</p>
+      <p class="settings-note">Note: Each site origin (e.g. <code>localhost</code> vs. <code>jmerk-bot.github.io</code>) has its own browser storage. If you added your OpenAI key on the OpenAI dashboard or on localhost, paste your <code>sk-...</code> key here on the live site (or sync via Cloud Backup, which encrypts it with AES-256-GCM using your GitHub token) to activate OpenAI Neural Voices.</p>
       <div class="api-key-row">
         <input
           id="openai-api-key"
           class="cloud-input"
           type="password"
-          placeholder="${status.hasOpenAiKey ? `Saved (${status.maskedKey}) — paste new sk-... key to replace` : 'Paste your OpenAI Secret Key here (sk-proj-...)'}"
+          placeholder="${status.hasOpenAiKey ? `Saved (${escHtml(status.maskedKey)}) — paste new sk-... key to replace` : 'Paste your OpenAI Secret Key here (sk-proj-...)'}"
           autocomplete="off"
           spellcheck="false"
         >
@@ -1632,6 +1646,11 @@ export function downloadBackupFile() {
 
 export async function handleBackupFilePicked(file) {
   if (!file) return;
+  if (typeof file.size === 'number' && file.size > 4 * 1024 * 1024) {
+    statusNotice = 'Backup file exceeds the 4 MB safety limit.';
+    renderApp();
+    return;
+  }
   try {
     const text = await file.text();
     const copy = readBackup(text);

@@ -25,7 +25,15 @@ import {
 } from '../js/matcher.js';
 import { assignVoicesToCharacters, VOICE_PROFILES } from '../js/voice.js';
 import { parseScriptText } from '../js/pdf.js';
-import { STORAGE_KEY, LOG_KEY, obfuscateKeyForSync, deobfuscateKeyFromSync } from '../js/state.js';
+import {
+  STORAGE_KEY,
+  LOG_KEY,
+  encryptSecretForCloud,
+  decryptSecretFromCloud,
+  backupCopy,
+  applySavedState,
+  state
+} from '../js/state.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -119,11 +127,38 @@ const bestAlt = pickBestAlternativeForScript(
 );
 assert.ok(bestAlt.includes('wherefore art thou'), 'Should select SpeechRecognition alternative matching archaic script words');
 
-// Check Gist secret-scanner key vault obfuscation round-trip
+// Check AES-GCM-256 (`sp2:`) cloud vault encryption, tamper rejection & wrong-passphrase rejection
 const fakeKey = 'sk-proj-TestKey1234567890AbCdEfGhIjKlMnOpQrStUvWxYz';
-const masked = obfuscateKeyForSync(fakeKey);
-assert.ok(masked.startsWith('sp1:') && !masked.includes('sk-'), 'Obfuscated sync key must not expose sk- prefix');
-assert.equal(deobfuscateKeyFromSync(masked), fakeKey, 'Deobfuscated key must match original');
+const fakeGithubPat = 'ghp_ExampleSecretTokenForKeyDerivation12345';
+const encryptedVault = await encryptSecretForCloud(fakeKey, fakeGithubPat);
+assert.ok(encryptedVault.startsWith('sp2:') && !encryptedVault.includes('sk-'), 'AES-GCM vault must use sp2: prefix and never expose sk-');
+assert.equal(await decryptSecretFromCloud(encryptedVault, fakeGithubPat), fakeKey, 'AES-GCM vault must decrypt with matching passphrase');
+assert.equal(await decryptSecretFromCloud(encryptedVault, 'ghp_WrongPassphrase99999999999999'), '', 'AES-GCM vault must reject wrong passphrase');
+const tamperedVault = encryptedVault.slice(0, -2) + (encryptedVault.endsWith('ff') ? '00' : 'ff');
+assert.equal(await decryptSecretFromCloud(tamperedVault, fakeGithubPat), '', 'AES-GCM vault must reject tampered ciphertext');
+
+// Downloaded backups must never include any API key or voiceVault
+const exportedBackup = backupCopy();
+assert.equal('voiceVault' in exportedBackup.state, false, 'Downloaded backup JSON must never contain voiceVault');
+assert.equal(JSON.stringify(exportedBackup).includes('sk-'), false, 'Downloaded backup JSON must never contain API keys');
+
+// Prototype-pollution & dangerous key sanitization tests
+const pollutedPayload = JSON.parse(
+  '{"voiceOverrides":{"__proto__":{"polluted":true},"constructor":"onyx","HAMLET":"echo"},"customPlays":[{"id":"p1","title":"Test","scenes":[{"id":"s1","title":"S1","lines":[{"speaker":"__proto__","text":"bad"},{"speaker":"ROMEO","text":"Good morrow!"}]}]}]}'
+);
+applySavedState(pollutedPayload);
+assert.equal(({}).polluted, undefined, 'Object.prototype must never be polluted');
+assert.equal(Object.hasOwn(state.voiceOverrides, 'constructor'), false, 'Forbidden keys must be stripped from voiceOverrides');
+assert.equal(state.voiceOverrides.HAMLET, 'echo');
+assert.equal(state.customPlays[0].scenes[0].lines.length, 1, 'Forbidden speaker names must be stripped from customPlays');
+
+// Check CSP & Referrer-Policy in index.html + SRI + isEvalSupported: false in pdf.js
+const indexHtml = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+assert.ok(indexHtml.includes('http-equiv="Content-Security-Policy"'), 'index.html must enforce a Content-Security-Policy');
+assert.ok(indexHtml.includes('name="referrer" content="no-referrer"'), 'index.html must enforce no-referrer');
+const pdfJsSource = fs.readFileSync(path.join(ROOT, 'js/pdf.js'), 'utf8');
+assert.ok(pdfJsSource.includes('sha384-'), 'js/pdf.js must enforce SHA-384 Subresource Integrity on CDN modules');
+assert.ok(pdfJsSource.includes('isEvalSupported: false'), 'js/pdf.js must disable eval in PDF.js');
 
 // Check verbatim classic metadata
 const verbatimPlays = allPlays.filter((p) => p.verbatim);

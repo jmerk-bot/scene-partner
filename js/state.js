@@ -101,53 +101,205 @@ export const state = {
 
 let frozen = false;
 
-// Lightly XOR + Base64 encode the OpenAI key before including it in a Gist backup
-// so GitHub's automated Gist secret scanner never auto-revokes your OpenAI key!
-const MASK_SALT = 'ScenePartnerFolio1623';
+// Legacy v1 XOR salt retained strictly for one-way migration of existing `sp1:` Gist vaults
+// to `sp2:` Web Crypto AES-GCM-256 encrypted vaults. Never written by new snapshots.
+const LEGACY_MASK_SALT = 'ScenePartnerFolio1623';
 
-export function obfuscateKeyForSync(plainKey) {
-  if (!plainKey || typeof plainKey !== 'string') return '';
-  const bytes = [];
-  for (let i = 0; i < plainKey.length; i++) {
-    const code = plainKey.charCodeAt(i) ^ MASK_SALT.charCodeAt(i % MASK_SALT.length);
-    bytes.push(code.toString(16).padStart(2, '0'));
-  }
-  return `sp1:${bytes.join('')}`;
+const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+export function isSafeObjectKey(key) {
+  return typeof key === 'string' && key.length > 0 && key.length <= 80 && !FORBIDDEN_KEYS.has(key);
 }
 
-export function deobfuscateKeyFromSync(encoded) {
-  if (!encoded || typeof encoded !== 'string') return '';
-  if (encoded.startsWith('sk-')) return encoded;
-  if (!encoded.startsWith('sp1:')) return '';
-  const hex = encoded.slice(4);
-  let out = '';
+export function isValidOpenAiKeyFormat(key) {
+  return typeof key === 'string' && /^sk-[A-Za-z0-9_-]{12,240}$/.test(key.trim());
+}
+
+function bytesToHex(bytes) {
+  let hex = '';
+  for (let i = 0; i < bytes.length; i++) {
+    hex += bytes[i].toString(16).padStart(2, '0');
+  }
+  return hex;
+}
+
+function hexToBytes(hex) {
+  if (typeof hex !== 'string' || hex.length % 2 !== 0 || !/^[0-9a-f]+$/i.test(hex)) {
+    return null;
+  }
+  const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < hex.length; i += 2) {
-    const byte = parseInt(hex.slice(i, i + 2), 16);
-    const charCode = byte ^ MASK_SALT.charCodeAt((i / 2) % MASK_SALT.length);
+    out[i / 2] = parseInt(hex.slice(i, i + 2), 16);
+  }
+  return out;
+}
+
+async function deriveAesGcmKey(passphrase, saltBytes, usages) {
+  const enc = new TextEncoder();
+  const baseKey = await globalThis.crypto.subtle.importKey(
+    'raw',
+    enc.encode(`scene-partner-vault:v2:${passphrase}`),
+    'PBKDF2',
+    false,
+    ['deriveKey']
+  );
+  return globalThis.crypto.subtle.deriveKey(
+    {
+      name: 'PBKDF2',
+      salt: saltBytes,
+      iterations: 100000,
+      hash: 'SHA-256'
+    },
+    baseKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    usages
+  );
+}
+
+// Encrypts the OpenAI key using AES-GCM-256 keyed with PBKDF2-SHA256 from the user's
+// GitHub Personal Access Token (which never leaves the user's own devices).
+// Resulting `sp2:<saltHex>:<ivHex>:<cipherHex>` contains no `sk-` prefix (safe from
+// GitHub secret scanners) AND is cryptographically indecipherable even if the Gist URL leaks.
+export async function encryptSecretForCloud(plainKey, passphrase) {
+  if (!isValidOpenAiKeyFormat(plainKey) || !passphrase || !globalThis.crypto?.subtle) {
+    return '';
+  }
+  const salt = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
+  const aesKey = await deriveAesGcmKey(passphrase, salt, ['encrypt']);
+  const encoded = new TextEncoder().encode(plainKey.trim());
+  const cipherBuf = await globalThis.crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, encoded);
+  return `sp2:${bytesToHex(salt)}:${bytesToHex(iv)}:${bytesToHex(new Uint8Array(cipherBuf))}`;
+}
+
+export async function decryptSecretFromCloud(encodedVault, passphrase) {
+  if (!encodedVault || typeof encodedVault !== 'string') return '';
+
+  if (encodedVault.startsWith('sp2:')) {
+    if (!passphrase || !globalThis.crypto?.subtle) return '';
+    const parts = encodedVault.split(':');
+    if (parts.length !== 4) return '';
+    const salt = hexToBytes(parts[1]);
+    const iv = hexToBytes(parts[2]);
+    const cipher = hexToBytes(parts[3]);
+    if (!salt || salt.length !== 16 || !iv || iv.length !== 12 || !cipher || cipher.length < 17) {
+      return '';
+    }
+    try {
+      const aesKey = await deriveAesGcmKey(passphrase, salt, ['decrypt']);
+      const plainBuf = await globalThis.crypto.subtle.decrypt({ name: 'AES-GCM', iv }, aesKey, cipher);
+      const text = new TextDecoder().decode(plainBuf).trim();
+      return isValidOpenAiKeyFormat(text) ? text : '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  // Read-only legacy migration path for `sp1:` vaults created before v2 AES-GCM upgrade
+  if (encodedVault.startsWith('sp1:')) {
+    const legacy = deobfuscateLegacyKey(encodedVault);
+    return isValidOpenAiKeyFormat(legacy) ? legacy : '';
+  }
+
+  return '';
+}
+
+function deobfuscateLegacyKey(encoded) {
+  if (!encoded || !encoded.startsWith('sp1:')) return '';
+  const bytes = hexToBytes(encoded.slice(4));
+  if (!bytes) return '';
+  let out = '';
+  for (let i = 0; i < bytes.length; i++) {
+    const charCode = bytes[i] ^ LEGACY_MASK_SALT.charCodeAt(i % LEGACY_MASK_SALT.length);
     out += String.fromCharCode(charCode);
   }
   return out;
 }
 
-export function savedStateSnapshot() {
-  let openAiKeyMasked = '';
-  try {
-    const raw = JSON.parse(localStorage.getItem('scene-partner:openai:v1'));
-    if (raw && typeof raw.apiKey === 'string' && raw.apiKey.trim()) {
-      openAiKeyMasked = obfuscateKeyForSync(raw.apiKey.trim());
+function sanitizeVoiceOverrides(raw) {
+  const clean = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return clean;
+  for (const [k, v] of Object.entries(raw)) {
+    if (!Object.hasOwn(raw, k) || !isSafeObjectKey(k)) continue;
+    if (typeof v === 'string' && /^[a-z0-9-]{2,24}$/.test(v)) {
+      clean[k] = v;
     }
-  } catch (e) {}
+  }
+  return clean;
+}
 
+function sanitizeCustomPlay(rawPlay) {
+  if (!rawPlay || typeof rawPlay !== 'object' || Array.isArray(rawPlay)) return null;
+  if (typeof rawPlay.id !== 'string' || !rawPlay.id.trim() || rawPlay.id.length > 80) return null;
+  if (!Array.isArray(rawPlay.scenes) || rawPlay.scenes.length === 0) return null;
+
+  const safeScenes = [];
+  for (const sc of rawPlay.scenes.slice(0, 120)) {
+    if (!sc || typeof sc !== 'object' || !Array.isArray(sc.lines)) continue;
+    const safeLines = [];
+    for (const ln of sc.lines.slice(0, 3000)) {
+      if (!ln || typeof ln !== 'object') continue;
+      const speaker = typeof ln.speaker === 'string' ? ln.speaker.trim().slice(0, 48) : '';
+      const text = typeof ln.text === 'string' ? ln.text.trim().slice(0, 8000) : '';
+      if (!speaker || !text || !isSafeObjectKey(speaker)) continue;
+      const direction = typeof ln.direction === 'string' && ln.direction.trim()
+        ? ln.direction.trim().slice(0, 280)
+        : undefined;
+      safeLines.push(direction ? { speaker, text, direction } : { speaker, text });
+    }
+    if (safeLines.length > 0) {
+      safeScenes.push({
+        id: typeof sc.id === 'string' && sc.id.trim() ? sc.id.trim().slice(0, 60) : `scene-${safeScenes.length + 1}`,
+        title: typeof sc.title === 'string' && sc.title.trim() ? sc.title.trim().slice(0, 120) : `Scene ${safeScenes.length + 1}`,
+        lines: safeLines
+      });
+    }
+  }
+
+  if (safeScenes.length === 0) return null;
+
+  return {
+    id: rawPlay.id.trim().slice(0, 80),
+    title: typeof rawPlay.title === 'string' && rawPlay.title.trim() ? rawPlay.title.trim().slice(0, 140) : 'Uploaded Script',
+    playwright: typeof rawPlay.playwright === 'string' && rawPlay.playwright.trim() ? rawPlay.playwright.trim().slice(0, 100) : 'Custom Sides',
+    year: typeof rawPlay.year === 'string' ? rawPlay.year.trim().slice(0, 32) : 'Custom Upload',
+    category: 'Uploaded Scripts',
+    custom: true,
+    scenes: safeScenes
+  };
+}
+
+function sanitizeHistoryEntry(item) {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+  return {
+    at: typeof item.at === 'string' ? item.at.slice(0, 40) : new Date().toISOString(),
+    playId: typeof item.playId === 'string' ? item.playId.slice(0, 80) : '',
+    playTitle: typeof item.playTitle === 'string' ? item.playTitle.slice(0, 140) : '',
+    sceneTitle: typeof item.sceneTitle === 'string' ? item.sceneTitle.slice(0, 140) : '',
+    roles: Array.isArray(item.roles)
+      ? item.roles.filter((r) => typeof r === 'string' && isSafeObjectKey(r)).slice(0, 12).map((r) => r.slice(0, 48))
+      : [],
+    tolerance: typeof item.tolerance === 'string' && TOLERANCE_LEVELS[item.tolerance] ? item.tolerance : 'off-book',
+    accuracy: typeof item.accuracy === 'number' && Number.isFinite(item.accuracy)
+      ? Math.max(0, Math.min(100, Math.round(item.accuracy)))
+      : 0,
+    linesCount: Number.isInteger(item.linesCount) && item.linesCount >= 0 ? Math.min(10000, item.linesCount) : 0
+  };
+}
+
+// Local & downloadable snapshot — intentionally NEVER includes API keys or tokens
+// so downloaded `.json` backup files are always safe to store or share.
+export function savedStateSnapshot() {
   return {
     updatedAt: state.updatedAt,
     screen: state.screen,
     selectedPlayId: state.selectedPlayId,
     selectedSceneId: state.selectedSceneId,
     selectedCharacters: state.selectedCharacters,
-    voiceOverrides: state.voiceOverrides,
+    voiceOverrides: sanitizeVoiceOverrides(state.voiceOverrides),
     settings: state.settings,
     customPlays: state.customPlays,
-    ...(openAiKeyMasked ? { voiceVault: openAiKeyMasked } : {}),
     rehearsal: {
       lineIndex: state.rehearsal.lineIndex,
       completedScenes: state.rehearsal.completedScenes,
@@ -160,6 +312,42 @@ export function savedStateSnapshot() {
 
 export function serializeState() {
   return savedStateSnapshot();
+}
+
+// Cloud Gist snapshot — encrypts the OpenAI key with AES-GCM-256 derived from `cloudToken`
+export async function serializeStateForCloud(cloudToken) {
+  const base = savedStateSnapshot();
+  if (!cloudToken) return base;
+  try {
+    const raw = JSON.parse(localStorage.getItem('scene-partner:openai:v1') || '{}');
+    if (raw && isValidOpenAiKeyFormat(raw.apiKey)) {
+      const encryptedVault = await encryptSecretForCloud(raw.apiKey.trim(), cloudToken);
+      if (encryptedVault) {
+        return { ...base, voiceVault: encryptedVault };
+      }
+    }
+  } catch (e) {}
+  return base;
+}
+
+export async function restoreCloudVoiceVault(cloudData, cloudToken) {
+  if (!cloudData || typeof cloudData !== 'object') return false;
+  const vault = cloudData.voiceVault;
+  if (typeof vault !== 'string' || !vault) return false;
+  try {
+    const existing = JSON.parse(localStorage.getItem('scene-partner:openai:v1') || '{}');
+    if (existing && isValidOpenAiKeyFormat(existing.apiKey)) return false;
+    const decryptedKey = await decryptSecretFromCloud(vault, cloudToken);
+    if (isValidOpenAiKeyFormat(decryptedKey)) {
+      localStorage.setItem('scene-partner:openai:v1', JSON.stringify({
+        apiKey: decryptedKey,
+        model: 'gpt-4o-mini-tts',
+        sttModel: 'gpt-4o-mini-transcribe'
+      }));
+      return true;
+    }
+  } catch (e) {}
+  return false;
 }
 
 export function saveState({ touch = true } = {}) {
@@ -182,6 +370,7 @@ export function applySavedState(raw) {
   const data = raw.app === 'scene-partner' && raw.type === 'backup' && raw.state
     ? raw.state
     : raw;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
 
   if (Number.isInteger(data.updatedAt) && data.updatedAt >= 0) {
     state.updatedAt = data.updatedAt;
@@ -189,75 +378,71 @@ export function applySavedState(raw) {
   if (['library', 'setup', 'rehearsal'].includes(data.screen)) {
     state.screen = data.screen;
   }
-  if (typeof data.selectedPlayId === 'string' && data.selectedPlayId) {
+  if (typeof data.selectedPlayId === 'string' && isSafeObjectKey(data.selectedPlayId)) {
     state.selectedPlayId = data.selectedPlayId;
   }
-  if (typeof data.selectedSceneId === 'string' && data.selectedSceneId) {
+  if (typeof data.selectedSceneId === 'string' && isSafeObjectKey(data.selectedSceneId)) {
     state.selectedSceneId = data.selectedSceneId;
   }
   if (Array.isArray(data.selectedCharacters) && data.selectedCharacters.length > 0) {
-    state.selectedCharacters = data.selectedCharacters.filter((x) => typeof x === 'string' && x.trim());
+    const validChars = data.selectedCharacters
+      .filter((x) => typeof x === 'string' && isSafeObjectKey(x.trim()))
+      .slice(0, 20)
+      .map((x) => x.trim());
+    if (validChars.length > 0) state.selectedCharacters = validChars;
   }
-  if (data.voiceOverrides && typeof data.voiceOverrides === 'object' && !Array.isArray(data.voiceOverrides)) {
-    state.voiceOverrides = { ...data.voiceOverrides };
-  }
+  state.voiceOverrides = sanitizeVoiceOverrides(data.voiceOverrides);
 
   state.settings = { ...DEFAULT_SETTINGS };
-  if (data.settings && typeof data.settings === 'object') {
+  if (data.settings && typeof data.settings === 'object' && !Array.isArray(data.settings)) {
     const s = data.settings;
-    if (THEMES[s.theme]) state.settings.theme = s.theme;
-    if (TOLERANCE_LEVELS[s.tolerance]) state.settings.tolerance = s.tolerance;
-    if (CUE_VISIBILITY_MODES[s.cueVisibility]) state.settings.cueVisibility = s.cueVisibility;
+    if (Object.hasOwn(THEMES, s.theme)) state.settings.theme = s.theme;
+    if (Object.hasOwn(TOLERANCE_LEVELS, s.tolerance)) state.settings.tolerance = s.tolerance;
+    if (Object.hasOwn(CUE_VISIBILITY_MODES, s.cueVisibility)) state.settings.cueVisibility = s.cueVisibility;
     for (const boolKey of ['autoAdvance', 'autoListen', 'cueToCue', 'readStageDirections', 'focusLayout', 'loopLine', 'sound']) {
       if (typeof s[boolKey] === 'boolean') state.settings[boolKey] = s[boolKey];
     }
-    if (typeof s.voiceSpeed === 'number' && s.voiceSpeed >= 0.6 && s.voiceSpeed <= 1.6) {
+    if (typeof s.voiceSpeed === 'number' && Number.isFinite(s.voiceSpeed) && s.voiceSpeed >= 0.6 && s.voiceSpeed <= 1.6) {
       state.settings.voiceSpeed = s.voiceSpeed;
     }
-    if (typeof s.fontScale === 'number' && s.fontScale >= 0.8 && s.fontScale <= 1.5) {
+    if (typeof s.fontScale === 'number' && Number.isFinite(s.fontScale) && s.fontScale >= 0.8 && s.fontScale <= 1.5) {
       state.settings.fontScale = s.fontScale;
     }
   }
 
   if (Array.isArray(data.customPlays)) {
-    state.customPlays = data.customPlays.filter((p) => p && typeof p.id === 'string' && Array.isArray(p.scenes));
+    state.customPlays = data.customPlays
+      .slice(0, 25)
+      .map(sanitizeCustomPlay)
+      .filter(Boolean);
   }
 
-  // Restore OpenAI API key from private Gist / backup if this device doesn't have one yet
-  const restoredKey = deobfuscateKeyFromSync(data.voiceVault || data.openAiKey || '');
-  if (restoredKey && restoredKey.startsWith('sk-')) {
-    try {
-      const existing = JSON.parse(localStorage.getItem('scene-partner:openai:v1') || '{}');
-      if (!existing.apiKey) {
-        localStorage.setItem('scene-partner:openai:v1', JSON.stringify({
-          apiKey: restoredKey.trim(),
-          model: 'gpt-4o-mini-tts',
-          sttModel: 'gpt-4o-mini-transcribe'
-        }));
-      }
-    } catch (e) {}
-  }
-
-  if (data.rehearsal && typeof data.rehearsal === 'object') {
+  if (data.rehearsal && typeof data.rehearsal === 'object' && !Array.isArray(data.rehearsal)) {
     const r = data.rehearsal;
-    if (Number.isInteger(r.lineIndex) && r.lineIndex >= 0) state.rehearsal.lineIndex = r.lineIndex;
+    if (Number.isInteger(r.lineIndex) && r.lineIndex >= 0 && r.lineIndex <= 10000) state.rehearsal.lineIndex = r.lineIndex;
     if (Number.isInteger(r.completedScenes) && r.completedScenes >= 0) state.rehearsal.completedScenes = r.completedScenes;
     if (Number.isInteger(r.totalLinesPracticed) && r.totalLinesPracticed >= 0) state.rehearsal.totalLinesPracticed = r.totalLinesPracticed;
-    if (typeof r.bestAccuracy === 'number') state.rehearsal.bestAccuracy = r.bestAccuracy;
+    if (typeof r.bestAccuracy === 'number' && Number.isFinite(r.bestAccuracy)) {
+      state.rehearsal.bestAccuracy = Math.max(0, Math.min(100, r.bestAccuracy));
+    }
   }
 
   if (Array.isArray(data.history)) {
-    state.history = data.history.slice(-100);
+    state.history = data.history
+      .slice(-100)
+      .map(sanitizeHistoryEntry)
+      .filter(Boolean);
   }
 
   return true;
 }
 
 export function logRehearsalSession(entry) {
-  state.history.push({
+  const clean = sanitizeHistoryEntry({
     at: new Date().toISOString(),
     ...entry
   });
+  if (clean) state.history.push(clean);
   if (state.history.length > 100) {
     state.history = state.history.slice(-100);
   }
@@ -276,9 +461,19 @@ export function backupCopy() {
 }
 
 export function readBackup(text) {
+  if (typeof text !== 'string' || text.length > 4 * 1024 * 1024) return null;
   try {
     const copy = JSON.parse(text);
-    if (copy && copy.app === 'scene-partner' && copy.type === 'backup' && copy.state) {
+    if (
+      copy &&
+      typeof copy === 'object' &&
+      !Array.isArray(copy) &&
+      copy.app === 'scene-partner' &&
+      copy.type === 'backup' &&
+      copy.state &&
+      typeof copy.state === 'object' &&
+      !Array.isArray(copy.state)
+    ) {
       return copy;
     }
   } catch (e) {}
@@ -287,8 +482,9 @@ export function readBackup(text) {
 
 export function restoreBackup(copy) {
   if (!copy || !copy.state) return false;
+  if (!applySavedState(copy)) return false;
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(copy.state));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(savedStateSnapshot()));
   } catch (e) {
     return false;
   }

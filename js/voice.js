@@ -282,15 +282,16 @@ const CHARACTER_ARCHETYPE_HINTS = {
 // Deterministic hash so every character in any play (or uploaded PDF) gets a
 // unique, consistent voice profile across the whole script.
 export function assignVoicesToCharacters(characters = [], customOverrides = {}) {
-  const map = {};
+  const map = Object.create(null);
   const usedRecently = new Set();
+  const safeOverrides = customOverrides && typeof customOverrides === 'object' ? customOverrides : {};
 
   characters.forEach((charName, index) => {
     const key = String(charName || '').trim();
-    if (!key) return;
+    if (!key || key === '__proto__' || key === 'constructor' || key === 'prototype') return;
 
-    if (customOverrides[key]) {
-      const found = VOICE_PROFILES.find((v) => v.id === customOverrides[key]);
+    if (Object.hasOwn(safeOverrides, key)) {
+      const found = VOICE_PROFILES.find((v) => v.id === safeOverrides[key]);
       if (found) {
         map[key] = found;
         return;
@@ -298,7 +299,7 @@ export function assignVoicesToCharacters(characters = [], customOverrides = {}) 
     }
 
     const upper = key.toUpperCase().replace(/[^A-Z]/g, '_');
-    const hintId = CHARACTER_ARCHETYPE_HINTS[upper];
+    const hintId = Object.hasOwn(CHARACTER_ARCHETYPE_HINTS, upper) ? CHARACTER_ARCHETYPE_HINTS[upper] : null;
     if (hintId && !usedRecently.has(hintId)) {
       const hinted = VOICE_PROFILES.find((v) => v.id === hintId);
       if (hinted) {
@@ -314,7 +315,7 @@ export function assignVoicesToCharacters(characters = [], customOverrides = {}) 
     for (let i = 0; i < key.length; i++) {
       hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
     }
-    let idx = hash % VOICE_PROFILES.length;
+    const idx = hash % VOICE_PROFILES.length;
     for (let attempt = 0; attempt < VOICE_PROFILES.length; attempt++) {
       const candidate = VOICE_PROFILES[(idx + attempt) % VOICE_PROFILES.length];
       if (!usedRecently.has(candidate.id)) {
@@ -327,7 +328,7 @@ export function assignVoicesToCharacters(characters = [], customOverrides = {}) 
     map[key] = VOICE_PROFILES[idx];
   });
 
-  return map;
+  return { ...map };
 }
 
 export function getVoiceProfile(voiceId) {
@@ -349,30 +350,44 @@ function setVoiceRuntimeStatus(patch) {
   onVoiceStatusCallback?.(lastOpenAiStatus);
 }
 
+const VALID_OPENAI_KEY_RE = /^sk-[A-Za-z0-9_-]{12,240}$/;
+
 export function loadVoiceConfig() {
   try {
     const raw = JSON.parse(localStorage.getItem(OPENAI_KEY_STORAGE));
     if (raw && typeof raw === 'object') {
-      if (typeof raw.apiKey === 'string') openAiConfig.apiKey = raw.apiKey.trim();
-      if (typeof raw.model === 'string') openAiConfig.model = raw.model;
+      const cleaned = typeof raw.apiKey === 'string' ? raw.apiKey.replace(/[\r\n\t\s]/g, '') : '';
+      openAiConfig.apiKey = VALID_OPENAI_KEY_RE.test(cleaned) ? cleaned : '';
+      if (typeof raw.model === 'string' && /^[a-z0-9.-]{3,40}$/i.test(raw.model)) {
+        openAiConfig.model = raw.model;
+      }
     }
   } catch (e) {}
   return openAiConfig;
 }
 
 export async function saveVoiceApiKey(rawKey) {
-  openAiConfig.apiKey = (rawKey || '').trim();
+  const cleaned = String(rawKey || '').replace(/[\r\n\t\s]/g, '');
+  if (!VALID_OPENAI_KEY_RE.test(cleaned)) {
+    setVoiceRuntimeStatus({
+      active: false,
+      lastError: 'Invalid OpenAI API key format (expected a secret key starting with sk-).'
+    });
+    return false;
+  }
+  openAiConfig.apiKey = cleaned;
   try {
     localStorage.setItem(OPENAI_KEY_STORAGE, JSON.stringify(openAiConfig));
   } catch (e) {}
-  if (openAiConfig.apiKey) {
-    return testOpenAiVoiceConnection();
-  }
-  return false;
+  return testOpenAiVoiceConnection();
 }
 
 export function clearVoiceApiKey() {
   openAiConfig.apiKey = '';
+  for (const url of ttsAudioCache.values()) {
+    try { URL.revokeObjectURL(url); } catch (e) {}
+  }
+  ttsAudioCache.clear();
   setVoiceRuntimeStatus({ active: false, lastModelUsed: '', lastError: '' });
   try {
     localStorage.removeItem(OPENAI_KEY_STORAGE);
@@ -380,7 +395,7 @@ export function clearVoiceApiKey() {
 }
 
 export function hasOpenAiKey() {
-  return Boolean(openAiConfig.apiKey && openAiConfig.apiKey.length > 12);
+  return VALID_OPENAI_KEY_RE.test(openAiConfig.apiKey);
 }
 
 export async function testOpenAiVoiceConnection() {
@@ -674,6 +689,14 @@ async function ensureOpenAiAudioUrl(spokenText, voiceProfile, speed) {
     });
 
     const audioUrl = URL.createObjectURL(blob);
+    if (ttsAudioCache.size >= 60) {
+      const oldestKey = ttsAudioCache.keys().next().value;
+      const oldestUrl = ttsAudioCache.get(oldestKey);
+      if (oldestUrl) {
+        try { URL.revokeObjectURL(oldestUrl); } catch (e) {}
+      }
+      ttsAudioCache.delete(oldestKey);
+    }
     ttsAudioCache.set(cacheKey, audioUrl);
     return audioUrl;
   })();

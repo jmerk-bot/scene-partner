@@ -67,19 +67,22 @@ const MORE_REPERTOIRE = [
 // Normalize a play object so `.characters` and `.characterLineCounts` are always populated
 export function enrichPlay(rawPlay) {
   const play = hydrateCatalogPlay(rawPlay);
-  const counts = {};
+  const counts = Object.create(null);
   for (const scene of play.scenes || []) {
     for (const line of scene.lines || []) {
       const sp = String(line.speaker || '').trim();
-      if (sp) counts[sp] = (counts[sp] || 0) + 1;
+      if (sp && sp !== '__proto__' && sp !== 'constructor' && sp !== 'prototype') {
+        counts[sp] = (counts[sp] || 0) + 1;
+      }
     }
   }
   const characters = Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
+  const plainCounts = { ...counts };
   return {
     ...play,
     characters,
-    characterLineCounts: counts,
-    totalLines: Object.values(counts).reduce((a, b) => a + b, 0)
+    characterLineCounts: plainCounts,
+    totalLines: Object.values(plainCounts).reduce((a, b) => a + b, 0)
   };
 }
 

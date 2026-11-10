@@ -22,7 +22,7 @@ import {
   TOLERANCE_ORDER,
   tokenizeLine,
   evaluateSpokenLine,
-  isPromptCommand
+  detectSpokenPromptRequest
 } from './matcher.js';
 import {
   VOICE_PROFILES,
@@ -30,6 +30,7 @@ import {
   assignVoicesToCharacters,
   getVoiceProfile,
   speakCharacterLine,
+  prefetchCharacterLine,
   stopAllSpeaking,
   startListening,
   stopListening,
@@ -53,9 +54,11 @@ const $ = (id) => document.getElementById(id);
 // Transient UI state (not persisted on every keystroke)
 let searchQuery = '';
 let selectedPlaywrightFilter = 'ALL';
+let verbatimOnlyFilter = false;
 let liveSpokenTranscript = '';
 let liveEvaluation = null;
 let partnerActiveWordIndex = -1;
+let partnerAudioLoading = false;
 let micStatus = 'idle'; // 'idle' | 'listening' | 'blocked' | 'unsupported' | 'warning'
 let statusNotice = '';
 let settingsOpen = false;
@@ -63,6 +66,15 @@ let settingsTab = 'rehearsal'; // 'rehearsal' | 'voices' | 'cloud'
 let pasteModalOpen = false;
 let curtainModalOpen = false;
 let autoAdvanceTimer = null;
+let pauseGraceTimer = null;
+let screenWakeLock = null;
+
+const THEME_META_COLORS = {
+  shakespearean: '#efe6d1',
+  modern: '#0f0d0c',
+  'high-visibility': '#000000',
+  daylight: '#f4f4f0'
+};
 
 export function escHtml(str) {
   return String(str ?? '')
@@ -92,7 +104,37 @@ export function applyThemeToDom() {
   const theme = THEMES[state.settings.theme] ? state.settings.theme : 'shakespearean';
   document.documentElement.setAttribute('data-theme', theme);
   document.documentElement.style.setProperty('--script-scale', String(state.settings.fontScale || 1));
+  const metaTheme = document.getElementById('meta-theme-color');
+  if (metaTheme) {
+    metaTheme.setAttribute('content', THEME_META_COLORS[theme] || '#efe6d1');
+  }
   setSoundEnabled(state.settings.sound);
+}
+
+async function syncScreenWakeLock() {
+  if (typeof navigator === 'undefined' || !('wakeLock' in navigator)) return;
+  const shouldHold = state.screen === 'rehearsal' && state.rehearsal.playing;
+  if (shouldHold && !screenWakeLock) {
+    try {
+      screenWakeLock = await navigator.wakeLock.request('screen');
+      screenWakeLock.addEventListener?.('release', () => {
+        screenWakeLock = null;
+      });
+    } catch (e) {}
+  } else if (!shouldHold && screenWakeLock) {
+    try {
+      await screenWakeLock.release();
+    } catch (e) {}
+    screenWakeLock = null;
+  }
+}
+
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      syncScreenWakeLock();
+    }
+  });
 }
 
 // ---------- Navigation & Screen Switching ----------
@@ -200,10 +242,14 @@ function jumpToFirstCueWindow(scene) {
 export function stopRehearsalPlayback() {
   state.rehearsal.playing = false;
   clearTimeout(autoAdvanceTimer);
+  clearTimeout(pauseGraceTimer);
   autoAdvanceTimer = null;
+  pauseGraceTimer = null;
+  partnerAudioLoading = false;
   stopAllSpeaking();
   stopListening();
   partnerActiveWordIndex = -1;
+  syncScreenWakeLock();
 }
 
 export function togglePlayPauseRehearsal() {
@@ -257,7 +303,14 @@ export function requestLinePrompt() {
   if (!currentLine) return;
 
   const tokens = tokenizeLine(currentLine.text);
-  const startWord = liveEvaluation ? liveEvaluation.activeIndex : state.rehearsal.revealedHints;
+  // Advance past whichever is further: spoken word cursor OR previously revealed hints
+  let startWord = Math.max(
+    liveEvaluation ? liveEvaluation.activeIndex : 0,
+    state.rehearsal.revealedHints
+  );
+  if (startWord >= tokens.length) {
+    startWord = Math.max(0, tokens.length - 5);
+  }
   const promptSlice = tokens.slice(startWord, startWord + 5).map((t) => t.display).join(' ');
 
   state.rehearsal.revealedHints = Math.min(tokens.length, startWord + 5);
@@ -266,6 +319,7 @@ export function requestLinePrompt() {
   state.rehearsal.lineStats[state.rehearsal.lineIndex] = stat;
 
   // Speak the prompt softly using the Stage Manager voice, then resume listening
+  clearTimeout(pauseGraceTimer);
   stopListening();
   speakCharacterLine(promptSlice || currentLine.text.slice(0, 60), STAGE_DIRECTION_VOICE, {
     speed: 1.0,
@@ -277,6 +331,21 @@ export function requestLinePrompt() {
     }
   });
   renderKaraokeFocusOnly();
+}
+
+// Pre-generate OpenAI neural audio for the next 2 upcoming partner cues so transitions have zero dead air
+function warmUpcomingPartnerLines(play, scene, fromIdx, voiceMap) {
+  let warmed = 0;
+  for (let i = fromIdx; i < scene.lines.length && warmed < 2; i++) {
+    const candidate = scene.lines[i];
+    if (!candidate || isUserCharacter(candidate.speaker)) continue;
+    const profile = voiceMap[candidate.speaker] || VOICE_PROFILES[0];
+    const textToWarm = state.settings.readStageDirections && candidate.direction
+      ? `${candidate.direction}. ${candidate.text}`
+      : candidate.text;
+    prefetchCharacterLine(textToWarm, profile, state.settings.voiceSpeed);
+    warmed += 1;
+  }
 }
 
 // Simulate speaking the rest of the current user line (useful in quiet spaces or when testing without a mic)
@@ -294,8 +363,11 @@ export function markUserLineDone() {
 
 function runCurrentLineTurn() {
   clearTimeout(autoAdvanceTimer);
+  clearTimeout(pauseGraceTimer);
+  partnerAudioLoading = false;
   stopAllSpeaking();
   stopListening();
+  syncScreenWakeLock();
 
   const play = getActivePlay();
   const scene = getActiveScene(play);
@@ -323,7 +395,11 @@ function runCurrentLineTurn() {
     }
   }
 
+  const voiceMap = assignVoicesToCharacters(play.characters, state.voiceOverrides);
   const userTurn = isUserCharacter(line.speaker);
+
+  // Warm the next upcoming partner speeches in the background while this turn plays
+  warmUpcomingPartnerLines(play, scene, userTurn ? idx + 1 : idx + 1, voiceMap);
 
   if (userTurn) {
     liveEvaluation = evaluateSpokenLine(line.text, '', state.settings.tolerance);
@@ -337,7 +413,6 @@ function runCurrentLineTurn() {
     liveEvaluation = null;
     renderApp();
     scrollActiveLineIntoView();
-    const voiceMap = assignVoicesToCharacters(play.characters, state.voiceOverrides);
     const voiceProfile = voiceMap[line.speaker] || VOICE_PROFILES[0];
     const textToSpeak = state.settings.readStageDirections && line.direction
       ? `${line.direction}. ${line.text}`
@@ -345,13 +420,24 @@ function runCurrentLineTurn() {
 
     speakCharacterLine(textToSpeak, voiceProfile, {
       speed: state.settings.voiceSpeed,
+      onLoading: (isLoading) => {
+        partnerAudioLoading = isLoading;
+        renderMicBadgeOnly();
+      },
       onWord: (wordIdx) => {
         partnerActiveWordIndex = wordIdx;
         renderKaraokeFocusOnly();
       },
       onEnd: () => {
+        partnerAudioLoading = false;
         if (!state.rehearsal.playing) return;
         partnerActiveWordIndex = -1;
+        if (state.settings.loopLine) {
+          autoAdvanceTimer = setTimeout(() => {
+            if (state.rehearsal.playing) runCurrentLineTurn();
+          }, 550);
+          return;
+        }
         advanceToNextLine();
       }
     });
@@ -371,9 +457,11 @@ function beginActorTurnListening(line) {
     },
     onTranscript: (transcript) => {
       if (!state.rehearsal.playing) return;
-      // Check if the actor called "Line!"
-      const lastWord = transcript.trim().split(/\s+/).pop() || '';
-      if (isPromptCommand(lastWord) && transcript.trim().split(/\s+/).length <= 3) {
+      clearTimeout(pauseGraceTimer);
+
+      // Check if the actor called "Line!" or "Line please" (works at start OR mid-monologue)
+      const currentCursor = liveEvaluation ? liveEvaluation.activeIndex : 0;
+      if (detectSpokenPromptRequest(transcript, line.text, currentCursor)) {
         requestLinePrompt();
         return;
       }
@@ -384,7 +472,7 @@ function beginActorTurnListening(line) {
 
       state.rehearsal.lineStats[state.rehearsal.lineIndex] = {
         accuracy: evalResult.accuracy,
-        attempts: 1,
+        attempts: (state.rehearsal.lineStats[state.rehearsal.lineIndex]?.attempts || 1),
         prompted: Boolean(state.rehearsal.lineStats[state.rehearsal.lineIndex]?.prompted)
       };
 
@@ -395,6 +483,14 @@ function beginActorTurnListening(line) {
         autoAdvanceTimer = setTimeout(() => {
           completeUserTurn(evalResult);
         }, 420);
+      } else if (state.settings.autoAdvance && evalResult.isNearCompleteForPause) {
+        // Hands-free grace window: if actor reached the tail of the speech nearly within tolerance
+        // and pauses for 1.85s, advance smoothly without forcing them to walk over to tap the tablet.
+        pauseGraceTimer = setTimeout(() => {
+          if (state.rehearsal.playing && isUserCharacter(line.speaker)) {
+            completeUserTurn(evalResult);
+          }
+        }, 1850);
       }
     }
   });
@@ -402,16 +498,25 @@ function beginActorTurnListening(line) {
 
 function completeUserTurn(evalResult) {
   clearTimeout(autoAdvanceTimer);
+  clearTimeout(pauseGraceTimer);
   stopListening();
   playLineCompleteChime();
 
+  const prevAttempts = state.rehearsal.lineStats[state.rehearsal.lineIndex]?.attempts || 0;
   state.rehearsal.totalLinesPracticed += 1;
   state.rehearsal.lineStats[state.rehearsal.lineIndex] = {
     accuracy: evalResult?.accuracy ?? 1,
-    attempts: 1,
+    attempts: prevAttempts + 1,
     prompted: Boolean(state.rehearsal.lineStats[state.rehearsal.lineIndex]?.prompted)
   };
   saveState();
+
+  if (state.settings.loopLine) {
+    autoAdvanceTimer = setTimeout(() => {
+      if (state.rehearsal.playing) runCurrentLineTurn();
+    }, 650);
+    return;
+  }
   advanceToNextLine();
 }
 
@@ -524,6 +629,20 @@ export function handlePastedScriptSubmit() {
   selectPlay(parsedPlay.id);
 }
 
+export function deleteCustomPlay(playId) {
+  const target = state.customPlays.find((p) => p.id === playId);
+  if (!target) return;
+  state.customPlays = state.customPlays.filter((p) => p.id !== playId);
+  if (state.selectedPlayId === playId) {
+    const fallback = getAllPlays(state.customPlays)[0];
+    state.selectedPlayId = fallback?.id || 'shake-hamlet';
+    state.selectedSceneId = fallback?.scenes?.[0]?.id || '';
+    state.selectedCharacters = fallback?.characters?.[0] ? [fallback.characters[0]] : ['HAMLET'];
+  }
+  saveState();
+  renderApp();
+}
+
 // ---------- Rendering ----------
 
 export function renderApp() {
@@ -618,7 +737,16 @@ function renderHeaderHtml() {
 
 function renderLibraryScreenHtml() {
   const allPlays = getAllPlays(state.customPlays);
-  const playwrightGroups = groupPlaysByPlaywright(allPlays);
+  const activePlay = getActivePlay();
+  const activeScene = getActiveScene(activePlay);
+  const activeRoles = state.selectedCharacters.map(formatSpeakerName).join(', ');
+  const resumeLineNum = Math.min((state.rehearsal.lineIndex || 0) + 1, Math.max(1, activeScene.lines?.length || 1));
+
+  const baseFiltered = verbatimOnlyFilter
+    ? allPlays.filter((p) => p.verbatim || p.custom)
+    : allPlays;
+
+  const playwrightGroups = groupPlaysByPlaywright(baseFiltered);
   const playwrightNames = ['ALL', ...playwrightGroups.map((g) => g.playwright)];
 
   const q = searchQuery.trim().toLowerCase();
@@ -640,7 +768,7 @@ function renderLibraryScreenHtml() {
 
   const filterChips = playwrightNames.map((name) => {
     const count = name === 'ALL'
-      ? allPlays.length
+      ? baseFiltered.length
       : (playwrightGroups.find((g) => g.playwright === name)?.plays.length || 0);
     const label = name === 'ALL' ? `All Playwrights (${count})` : `${name} (${count})`;
     return `<button class="playwright-chip ${selectedPlaywrightFilter === name ? 'active' : ''}" data-action="filter-playwright" data-value="${escHtml(name)}">${escHtml(label)}</button>`;
@@ -667,19 +795,31 @@ function renderLibraryScreenHtml() {
 
   return `
     <div class="library-container">
+      <section class="resume-rehearsal-bar" aria-label="Continue active rehearsal">
+        <div class="resume-copy">
+          <span class="resume-eyebrow">CURRENTLY ON YOUR MUSIC STAND</span>
+          <strong>${escHtml(activePlay.title)}</strong>
+          <span>${escHtml(activeScene.title)} · Playing <strong>${escHtml(activeRoles || 'Lead')}</strong> · Cue ${resumeLineNum} of ${activeScene.lines?.length || 1}</span>
+        </div>
+        <div class="resume-actions">
+          <button class="quiet-btn small" data-action="nav" data-value="setup">🎭 Cast &amp; Voices</button>
+          <button class="start-rehearsal-btn resume-cta-btn" data-action="resume-rehearsal">▶ Resume Rehearsal</button>
+        </div>
+      </section>
+
       <section class="hero-banner">
         <div class="hero-copy">
           <span class="eyebrow">OFF-BOOK REHEARSAL STUDIO</span>
           <h1>Choose Your Script or Upload Sides</h1>
-          <p>Select from <strong>${allPlays.length} pre-loaded classics</strong> (including the Top 20 Shakespeare plays) or upload your own audition PDF. Pick your character(s), and let your AI scene partners read every other role with distinct voices while live karaoke transcription tracks your lines.</p>
+          <p>Select from <strong>${allPlays.length} pre-loaded classics</strong> (including the Top 20 Shakespeare plays) or drag &amp; drop your own audition PDF. Pick your character(s), and let your AI scene partners read every other role with distinct voices while live karaoke transcription tracks your lines.</p>
           ${statusNotice ? `<p class="status-banner">${escHtml(statusNotice)}</p>` : ''}
         </div>
-        <div class="upload-actions-card">
+        <div id="upload-drop-zone" class="upload-actions-card">
           <button class="primary-upload-btn" data-action="trigger-pdf-upload">
             <span class="upload-icon">📄</span>
             <span>
-              <strong>Upload Script PDF / TXT</strong>
-              <small>Extracts scenes &amp; character cues on device</small>
+              <strong>Upload or Drop Script PDF / TXT</strong>
+              <small>Extracts scenes &amp; character cues privately on device</small>
             </span>
           </button>
           <button class="secondary-upload-btn" data-action="open-paste-modal">
@@ -689,16 +829,21 @@ function renderLibraryScreenHtml() {
       </section>
 
       <section class="library-toolbar">
-        <div class="search-box">
-          <span class="search-icon" aria-hidden="true">🔍</span>
-          <input
-            id="library-search"
-            type="search"
-            placeholder="Search by play title, playwright, or character (e.g. Hamlet, Juliet, Lady Bracknell, Chekhov)…"
-            value="${escHtml(searchQuery)}"
-            autocomplete="off"
-          >
-          ${searchQuery ? `<button class="clear-search-btn" data-action="clear-search" aria-label="Clear search">✕</button>` : ''}
+        <div class="search-row-flex">
+          <div class="search-box">
+            <span class="search-icon" aria-hidden="true">🔍</span>
+            <input
+              id="library-search"
+              type="search"
+              placeholder="Search by play title, playwright, or character (e.g. Hamlet, Juliet, Lady Bracknell, Chekhov)…"
+              value="${escHtml(searchQuery)}"
+              autocomplete="off"
+            >
+            ${searchQuery ? `<button class="clear-search-btn" data-action="clear-search" aria-label="Clear search">✕</button>` : ''}
+          </div>
+          <button class="playwright-chip verbatim-filter-btn ${verbatimOnlyFilter ? 'active' : ''}" data-action="toggle-verbatim-only" title="Filter strictly to verbatim public-domain play scenes and your uploaded scripts">
+            📜 Verbatim Text Only
+          </button>
         </div>
         <div class="playwright-bar" role="tablist" aria-label="Filter by playwright">
           ${filterChips}
@@ -713,18 +858,28 @@ function renderLibraryScreenHtml() {
 function renderPlayCardHtml(play) {
   const isSelected = play.id === state.selectedPlayId;
   const topRoles = play.characters.slice(0, 4).map(formatSpeakerName).join(', ');
+  const sourceBadge = play.custom
+    ? `<span class="play-source-tag custom-tag">📄 Uploaded</span>`
+    : play.verbatim
+      ? `<span class="play-source-tag verbatim-tag" title="Canonical verbatim public-domain script text">📜 Verbatim</span>`
+      : `<span class="play-source-tag studio-tag" title="Playable studio rehearsal adaptation — upload or paste sides for your exact edition">🎭 Studio Scene</span>`;
+
   return `
     <article class="play-card ${isSelected ? 'selected' : ''}" data-action="select-play" data-value="${escHtml(play.id)}">
       <div class="play-card-top">
         <span class="play-genre">${escHtml(play.genre || 'Classic Drama')}</span>
-        <span class="play-year">${escHtml(play.year || '')}</span>
+        <span class="play-card-meta-right">
+          ${sourceBadge}
+          ${play.year ? `<span class="play-year">${escHtml(play.year)}</span>` : ''}
+          ${play.custom ? `<button class="delete-play-btn" data-action="delete-custom-play" data-value="${escHtml(play.id)}" title="Delete uploaded script" aria-label="Delete ${escHtml(play.title)}">🗑️</button>` : ''}
+        </span>
       </div>
       <h3 class="play-title">${escHtml(play.title)}</h3>
       <p class="play-author">${escHtml(play.playwright)}</p>
       <p class="play-summary">${escHtml(play.summary || play.hook || '')}</p>
       <div class="play-card-footer">
         <span class="play-roles" title="Key roles">🎭 ${escHtml(topRoles)}</span>
-        <span class="play-choose-cta">Select →</span>
+        <span class="play-choose-cta">${isSelected ? 'Selected ✓' : 'Select →'}</span>
       </div>
     </article>
   `;
@@ -807,9 +962,10 @@ function renderSetupScreenHtml() {
     <div class="setup-container">
       <div class="setup-header-card">
         <div>
-          <span class="eyebrow">${escHtml(play.playwright)} · ${escHtml(play.year || '')}</span>
+          <span class="eyebrow">${escHtml(play.playwright)} · ${escHtml(play.year || '')} ${play.verbatim ? '· 📜 Verbatim Text' : (play.studioScene ? '· 🎭 Studio Rehearsal Scene' : '')}</span>
           <h1>${escHtml(play.title)}</h1>
           <p>${escHtml(play.summary || play.hook || '')}</p>
+          ${play.studioScene ? `<p class="studio-scene-note">Note: This catalog entry uses a studio rehearsal scene for character drill. Preparing a specific translation or cut? <button class="inline-link-btn" data-action="open-paste-modal">Paste your exact audition sides →</button></p>` : ''}
         </div>
         <div class="setup-cta-col">
           <button class="start-rehearsal-btn" data-action="start-rehearsal">
@@ -824,10 +980,9 @@ function renderSetupScreenHtml() {
           <h2>1. Select Act / Scene</h2>
           <p class="panel-note">Pick which scene to run, or toggle <strong>Cue-to-Cue</strong> to jump straight to your entrances.</p>
           <div class="scene-list">${sceneCards}</div>
-          <label class="cue-toggle-row">
-            <input type="checkbox" data-action="toggle-cue-to-cue" ${state.settings.cueToCue ? 'checked' : ''}>
-            <span><strong>Cue-to-Cue Mode:</strong> Skip long stretches where your selected character(s) have no lines</span>
-          </label>
+          <div style="margin-top:0.85rem;">
+            ${renderToggleRow('cueToCue', 'Cue-to-Cue Mode', 'Skip long stretches where your selected character(s) have no lines')}
+          </div>
         </section>
 
         <section class="setup-panel">
@@ -868,8 +1023,11 @@ function renderRehearsalScreenHtml() {
     renderScriptLineCardHtml(line, idx, currentIdx, voiceMap)
   ).join('');
 
+  const prevLine = currentIdx > 0 ? lines[currentIdx - 1] : null;
+  const focusFull = Boolean(state.settings.focusLayout);
+
   return `
-    <div class="rehearsal-stage">
+    <div class="rehearsal-stage ${focusFull ? 'is-focus-layout' : ''}">
       <!-- Top Stage Bar -->
       <div class="stage-topbar">
         <div class="stage-meta">
@@ -882,6 +1040,9 @@ function renderRehearsalScreenHtml() {
 
         <div class="stage-vis-group" role="group" aria-label="Line visibility mode">
           ${cueVisButtons}
+          <button class="vis-pill layout-pill ${focusFull ? 'active' : ''}" data-action="toggle-setting" data-value="focusLayout" title="Expand karaoke teleprompter to full height for across-the-room tablet reading">
+            ${focusFull ? '☷ Show Script Stream' : '⛶ Full Teleprompter'}
+          </button>
         </div>
 
         <div id="mic-status-slot" class="mic-status-slot">
@@ -891,13 +1052,15 @@ function renderRehearsalScreenHtml() {
 
       <!-- Center Karaoke Teleprompter Focus Deck -->
       <section id="karaoke-focus-deck" class="karaoke-focus-deck ${userTurn ? 'user-turn' : 'partner-turn'}">
-        ${renderKaraokeFocusInnerHtml(currentLine, currentIdx, userTurn, voiceMap, tol)}
+        ${renderKaraokeFocusInnerHtml(currentLine, currentIdx, userTurn, voiceMap, tol, prevLine)}
       </section>
 
       <!-- Scrolling Full Script Context View -->
-      <section class="script-scroll-stream" aria-label="Full scene script">
-        ${scriptFeedHtml}
-      </section>
+      ${focusFull ? '' : `
+        <section class="script-scroll-stream" aria-label="Full scene script">
+          ${scriptFeedHtml}
+        </section>
+      `}
 
       <!-- Bottom Rehearsal Transport Controls -->
       <footer class="rehearsal-transport">
@@ -910,8 +1073,11 @@ function renderRehearsalScreenHtml() {
         </div>
 
         <div class="transport-center">
-          <button class="prompt-line-btn" data-action="prompt-line" title="Ask the prompter to highlight and speak the next words (or say 'Line!')">
+          <button class="prompt-line-btn" data-action="prompt-line" title="Ask the prompter to highlight and speak the next 5 words (or say 'Line!')">
             💡 “Line!” (Prompt Me)
+          </button>
+          <button class="quiet-btn loop-line-btn ${state.settings.loopLine ? 'active' : ''}" data-action="toggle-setting" data-value="loopLine" title="Repeat this single speech on loop for monologue memorization">
+            ${state.settings.loopLine ? '🔂 Looping Cue' : '🔁 Loop Cue'}
           </button>
           ${userTurn ? `
             <button class="complete-line-btn" data-action="finish-user-line" title="Mark this speech complete and cue the next character">
@@ -919,7 +1085,7 @@ function renderRehearsalScreenHtml() {
             </button>
           ` : `
             <button class="quiet-btn" data-action="replay-partner-line" title="Hear your scene partner read this line again">
-              🔁 Replay Partner Voice
+              🔊 Replay Partner
             </button>
           `}
         </div>
@@ -938,6 +1104,9 @@ function renderMicBadgeHtml(userTurn) {
     return `<span class="mic-pill paused">⏸ Paused</span>`;
   }
   if (!userTurn) {
+    if (partnerAudioLoading) {
+      return `<span class="mic-pill partner">⏳ Cueing Neural Voice…</span>`;
+    }
     return `<span class="mic-pill partner">🔊 Scene Partner Speaking…</span>`;
   }
   if (micStatus === 'listening') {
@@ -949,7 +1118,19 @@ function renderMicBadgeHtml(userTurn) {
   return `<span class="mic-pill ready">🎙️ Your Turn</span>`;
 }
 
-function renderKaraokeFocusInnerHtml(currentLine, currentIdx, userTurn, voiceMap, tol) {
+function buildPrecedingCueSnippet(prevLine) {
+  if (!prevLine || !prevLine.text) return '';
+  const words = prevLine.text.trim().split(/\s+/);
+  const tail = words.length > 12 ? `…${words.slice(-12).join(' ')}` : prevLine.text.trim();
+  return `
+    <div class="preceding-cue-strip">
+      <span class="cue-from-label">Cue from ${escHtml(formatSpeakerName(prevLine.speaker))}:</span>
+      <span class="cue-from-quote">“${escHtml(tail)}”</span>
+    </div>
+  `;
+}
+
+function renderKaraokeFocusInnerHtml(currentLine, currentIdx, userTurn, voiceMap, tol, prevLine = null) {
   if (!currentLine) return `<p>End of scene.</p>`;
 
   const profile = voiceMap[currentLine.speaker] || VOICE_PROFILES[0];
@@ -991,13 +1172,15 @@ function renderKaraokeFocusInnerHtml(currentLine, currentIdx, userTurn, voiceMap
         </div>
       </div>
 
+      ${prevLine ? buildPrecedingCueSnippet(prevLine) : ''}
+
       <div class="karaoke-line-display">
         ${karaokeWordsHtml}
       </div>
 
       <div class="live-transcript-bar">
         <span class="transcript-label">🎙️ Heard:</span>
-        <span class="transcript-text">${liveSpokenTranscript ? `“${escHtml(liveSpokenTranscript)}”` : '<em>Speak your line aloud (or say “Line!” for a prompt)…</em>'}</span>
+        <span class="transcript-text">${liveSpokenTranscript ? `“${escHtml(liveSpokenTranscript)}”` : '<em>Speak your line aloud (or say “Line!” anytime for a 5-word prompt)…</em>'}</span>
       </div>
     `;
   }
@@ -1066,16 +1249,35 @@ function renderScriptLineCardHtml(line, idx, currentIdx, voiceMap) {
 export function renderKaraokeFocusOnly() {
   const deck = $('karaoke-focus-deck');
   if (!deck) return;
+  const prevDisplay = deck.querySelector('.karaoke-line-display');
+  const prevScrollTop = prevDisplay ? prevDisplay.scrollTop : 0;
+
   const play = getActivePlay();
   const scene = getActiveScene(play);
   const currentIdx = Math.min(Math.max(0, state.rehearsal.lineIndex), Math.max(0, scene.lines.length - 1));
   const currentLine = scene.lines[currentIdx];
+  const prevLine = currentIdx > 0 ? scene.lines[currentIdx - 1] : null;
   const userTurn = currentLine ? isUserCharacter(currentLine.speaker) : false;
   const voiceMap = assignVoicesToCharacters(play.characters, state.voiceOverrides);
   const tol = TOLERANCE_LEVELS[state.settings.tolerance] || TOLERANCE_LEVELS['off-book'];
 
   deck.className = `karaoke-focus-deck ${userTurn ? 'user-turn' : 'partner-turn'}`;
-  deck.innerHTML = renderKaraokeFocusInnerHtml(currentLine, currentIdx, userTurn, voiceMap, tol);
+  deck.innerHTML = renderKaraokeFocusInnerHtml(currentLine, currentIdx, userTurn, voiceMap, tol, prevLine);
+
+  // Preserve scroll position inside long monologues and smoothly keep the active word in view
+  const nextDisplay = deck.querySelector('.karaoke-line-display');
+  if (nextDisplay) {
+    nextDisplay.scrollTop = prevScrollTop;
+    const activeWordEl = nextDisplay.querySelector('.word-active, .partner-active');
+    if (activeWordEl) {
+      const containerRect = nextDisplay.getBoundingClientRect();
+      const wordRect = activeWordEl.getBoundingClientRect();
+      if (wordRect.bottom > containerRect.bottom - 18 || wordRect.top < containerRect.top + 12) {
+        const offset = (wordRect.top - containerRect.top) - containerRect.height * 0.38;
+        nextDisplay.scrollBy({ top: offset, behavior: 'smooth' });
+      }
+    }
+  }
   renderMicBadgeOnly();
 }
 
@@ -1338,6 +1540,21 @@ function renderPasteModalHtml() {
   `;
 }
 
+function findWeakestUserLineIndex() {
+  const entries = Object.entries(state.rehearsal.lineStats || {});
+  if (!entries.length) return -1;
+  let worstIdx = -1;
+  let worstScore = 2;
+  for (const [idxStr, st] of entries) {
+    const effective = (st.accuracy ?? 1) - (st.prompted ? 0.35 : 0);
+    if (effective < 0.85 && effective < worstScore) {
+      worstScore = effective;
+      worstIdx = Number(idxStr);
+    }
+  }
+  return worstIdx;
+}
+
 function renderCurtainModalHtml() {
   const play = getActivePlay();
   const scene = getActiveScene(play);
@@ -1347,6 +1564,12 @@ function renderCurtainModalHtml() {
     : 100;
   const promptedCount = stats.filter((s) => s.prompted).length;
   const tol = TOLERANCE_LEVELS[state.settings.tolerance] || TOLERANCE_LEVELS['off-book'];
+  const curTolPos = TOLERANCE_ORDER.indexOf(tol.id);
+  const nextTolKey = curTolPos >= 0 && curTolPos + 1 < TOLERANCE_ORDER.length
+    ? TOLERANCE_ORDER[curTolPos + 1]
+    : null;
+  const nextTol = nextTolKey ? TOLERANCE_LEVELS[nextTolKey] : null;
+  const weakestIdx = findWeakestUserLineIndex();
 
   return `
     <div class="modal-backdrop" data-action="close-modal"></div>
@@ -1370,11 +1593,17 @@ function renderCurtainModalHtml() {
         </div>
       </div>
 
-      <p class="settings-note">Rehearsed at <strong>${escHtml(tol.label)}</strong> strictness. Ready to tighten tolerance by one notch for the next pass?</p>
+      <p class="settings-note">
+        ${nextTol
+          ? `Rehearsed at <strong>${escHtml(tol.label)}</strong> strictness. Ready to tighten tolerance to <strong>${escHtml(nextTol.label)}</strong> for the next pass?`
+          : `Mastered at <strong>${escHtml(tol.label)}</strong> — our strictest word-perfect level!`}
+      </p>
 
-      <div class="modal-actions">
+      <div class="modal-actions curtain-actions">
         <button class="quiet-btn" data-action="nav" data-value="setup">Change Scene / Roles</button>
-        <button class="start-rehearsal-btn" data-action="replay-scene">🔁 Run Scene Again</button>
+        ${weakestIdx >= 0 ? `<button class="secondary-btn" data-action="drill-weakest-line" data-value="${weakestIdx}">🎯 Drill Prompted / Shaky Cue</button>` : ''}
+        <button class="secondary-btn" data-action="replay-scene">🔁 Run Again (${escHtml(tol.shortLabel)})</button>
+        ${nextTol ? `<button class="start-rehearsal-btn" data-action="level-up-replay" data-value="${nextTol.id}">⬆ Tighten to ${escHtml(nextTol.shortLabel)} &amp; Run</button>` : ''}
       </div>
     </div>
   `;
@@ -1418,11 +1647,35 @@ export async function handleBackupFilePicked(file) {
 export const uiActions = {
   'nav': (val) => navigateTo(val),
   'select-play': (val) => selectPlay(val),
+  'delete-custom-play': (val) => deleteCustomPlay(val),
+  'toggle-verbatim-only': () => {
+    verbatimOnlyFilter = !verbatimOnlyFilter;
+    renderApp();
+  },
   'select-scene': (val) => selectScene(val),
   'toggle-char': (val) => toggleCharacterSelection(val),
   'preview-voice': (val) => previewCharacterVoice(val),
   'start-rehearsal': () => startSceneRehearsal(true),
+  'resume-rehearsal': () => startSceneRehearsal(false),
   'replay-scene': () => startSceneRehearsal(true),
+  'level-up-replay': (nextTol) => {
+    if (TOLERANCE_LEVELS[nextTol]) {
+      state.settings.tolerance = nextTol;
+      saveState();
+    }
+    startSceneRehearsal(true);
+  },
+  'drill-weakest-line': (val) => {
+    const idx = Number(val);
+    curtainModalOpen = false;
+    state.screen = 'rehearsal';
+    state.rehearsal.lineIndex = Number.isInteger(idx) && idx >= 0 ? Math.max(0, idx - 1) : 0;
+    state.settings.loopLine = false;
+    state.rehearsal.playing = true;
+    saveState();
+    renderApp();
+    runCurrentLineTurn();
+  },
   'toggle-play': () => togglePlayPauseRehearsal(),
   'step-line': (val) => stepLine(Number(val)),
   'jump-line': (val) => jumpToLine(Number(val)),

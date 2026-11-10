@@ -36,7 +36,8 @@ document.addEventListener('input', (event) => {
 });
 
 // Keyboard shortcuts for rehearsal on tablet/desktop:
-// Space = Play/Pause scene, L = "Line!" prompt, Enter / Right = Delivered Cue / Next, Left = Prev Cue
+// Space = Play/Pause scene, L = "Line!" prompt, Enter / Right = Delivered Cue / Next,
+// Left = Prev Cue, F = Full Teleprompter view, R = Loop current cue
 document.addEventListener('keydown', (event) => {
   if (event.metaKey || event.ctrlKey || event.altKey) return;
   const tag = event.target?.tagName;
@@ -49,6 +50,12 @@ document.addEventListener('keydown', (event) => {
     } else if (event.key === 'l' || event.key === 'L') {
       event.preventDefault();
       uiActions['prompt-line']();
+    } else if (event.key === 'f' || event.key === 'F') {
+      event.preventDefault();
+      uiActions['toggle-setting']('focusLayout');
+    } else if (event.key === 'r' || event.key === 'R') {
+      event.preventDefault();
+      uiActions['toggle-setting']('loopLine');
     } else if (event.key === 'ArrowRight' || event.key === 'Enter') {
       event.preventDefault();
       uiActions['finish-user-line']();
@@ -57,6 +64,31 @@ document.addEventListener('keydown', (event) => {
       uiActions['step-line'](-1);
     }
   }
+});
+
+// Drag-and-drop PDF / TXT script support on the Library upload card
+document.addEventListener('dragover', (event) => {
+  const dropZone = event.target?.closest?.('#upload-drop-zone');
+  if (!dropZone) return;
+  event.preventDefault();
+  dropZone.classList.add('drag-over');
+});
+
+document.addEventListener('dragleave', (event) => {
+  const dropZone = event.target?.closest?.('#upload-drop-zone');
+  if (!dropZone) return;
+  if (!dropZone.contains(event.relatedTarget)) {
+    dropZone.classList.remove('drag-over');
+  }
+});
+
+document.addEventListener('drop', (event) => {
+  const dropZone = event.target?.closest?.('#upload-drop-zone');
+  if (!dropZone) return;
+  event.preventDefault();
+  dropZone.classList.remove('drag-over');
+  const file = event.dataTransfer?.files?.[0];
+  if (file) handleUploadedScriptFile(file);
 });
 
 // Hidden file inputs for PDF/Script upload and Backup JSON restore

@@ -11,6 +11,8 @@
 //      Whisper / `gpt-4o-mini-transcribe` verification when an OpenAI key is configured.
 //   4. Gentle Web Audio stage chimes (soft cue tone, prompt chime, curtain chord).
 
+import { pickBestAlternativeForScript } from './matcher.js';
+
 const OPENAI_KEY_STORAGE = 'scene-partner:openai:v1';
 
 // 11 distinct character voice profiles (OpenAI voice ID + theatrical persona + Web Speech fallback tuning)
@@ -492,6 +494,7 @@ export function playCurtainChord() {
 // ---------- TTS Voice Production ----------
 
 const ttsAudioCache = new Map(); // key: `${voiceId}:${speed}:${text}` -> objectUrl
+const ttsInFlight = new Map(); // key -> Promise<string> (deduplicates background prefetch + live play)
 let activeAudioEl = null;
 let activeAbortController = null;
 let activeWordTimer = null;
@@ -533,6 +536,7 @@ export async function speakCharacterLine(text, voiceProfile = VOICE_PROFILES[0],
   speed = 1.0,
   onWord = null,
   onEnd = null,
+  onLoading = null,
   preferCloud = true,
   forceOpenAIOnly = false
 } = {}) {
@@ -549,9 +553,10 @@ export async function speakCharacterLine(text, voiceProfile = VOICE_PROFILES[0],
   // Try OpenAI Neural TTS first if key is configured and online
   if (preferCloud && hasOpenAiKey() && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
     try {
-      await speakViaOpenAI(spokenText, words, voiceProfile, speed, onWord, onEnd);
+      await speakViaOpenAI(spokenText, words, voiceProfile, speed, onWord, onEnd, onLoading);
       return;
     } catch (err) {
+      onLoading?.(false);
       if (err?.name === 'AbortError') return;
       setVoiceRuntimeStatus({
         active: false,
@@ -563,6 +568,15 @@ export async function speakCharacterLine(text, voiceProfile = VOICE_PROFILES[0],
   }
 
   speakViaBrowser(spokenText, words, voiceProfile, speed, onWord, onEnd);
+}
+
+// Pre-warm upcoming partner lines in the background while the current cue is running
+// so scene partner responses play with near-zero latency.
+export function prefetchCharacterLine(text, voiceProfile = VOICE_PROFILES[0], speed = 1.0) {
+  if (!hasOpenAiKey() || (typeof navigator !== 'undefined' && navigator.onLine === false)) return;
+  const spokenText = cleanTextForSpeech(text);
+  if (!spokenText) return;
+  ensureOpenAiAudioUrl(spokenText, voiceProfile, speed).catch(() => {});
 }
 
 // Legacy `tts-1-hd` and `tts-1` only support these 6 voices; `gpt-4o-mini-tts` supports all 11.
@@ -608,14 +622,20 @@ async function requestOpenAiSpeechBlob(modelName, voiceName, spokenText, instruc
   return res.blob();
 }
 
-async function speakViaOpenAI(spokenText, words, voiceProfile, speed, onWord, onEnd) {
-  const cacheKey = `${voiceProfile.OpenAIVoice}:${speed.toFixed(2)}:${spokenText}`;
-  let audioUrl = ttsAudioCache.get(cacheKey);
+async function ensureOpenAiAudioUrl(spokenText, voiceProfile, speed) {
+  const voiceKey = voiceProfile.OpenAIVoice || 'onyx';
+  const cacheKey = `${voiceKey}:${speed.toFixed(2)}:${spokenText}`;
+  const cached = ttsAudioCache.get(cacheKey);
+  if (cached) {
+    setVoiceRuntimeStatus({ active: true, lastError: '' });
+    return cached;
+  }
 
-  const controller = new AbortController();
-  activeAbortController = controller;
+  if (ttsInFlight.has(cacheKey)) {
+    return ttsInFlight.get(cacheKey);
+  }
 
-  if (!audioUrl) {
+  const promise = (async () => {
     const targetSpeed = Math.min(1.5, Math.max(0.65, speed * (voiceProfile.rate || 1.0)));
     const modelsToTry = ['gpt-4o-mini-tts', 'tts-1-hd', 'tts-1'];
     let blob = null;
@@ -626,16 +646,14 @@ async function speakViaOpenAI(spokenText, words, voiceProfile, speed, onWord, on
       try {
         blob = await requestOpenAiSpeechBlob(
           modelName,
-          voiceProfile.OpenAIVoice || 'onyx',
+          voiceKey,
           spokenText,
           voiceProfile.instructions || 'Speak with clear, expressive theatrical delivery.',
-          targetSpeed,
-          controller.signal
+          targetSpeed
         );
         succeededModel = modelName;
         break;
       } catch (e) {
-        if (e?.name === 'AbortError') throw e;
         lastErr = e;
         // If 401 Invalid API key or 429 Insufficient Quota, no need to retry other models
         if (/incorrect api key|invalid_api_key|quota|billing/i.test(e?.message || '')) {
@@ -655,10 +673,38 @@ async function speakViaOpenAI(spokenText, words, voiceProfile, speed, onWord, on
       testedAt: Date.now()
     });
 
-    audioUrl = URL.createObjectURL(blob);
+    const audioUrl = URL.createObjectURL(blob);
     ttsAudioCache.set(cacheKey, audioUrl);
-  } else {
-    setVoiceRuntimeStatus({ active: true, lastError: '' });
+    return audioUrl;
+  })();
+
+  ttsInFlight.set(cacheKey, promise);
+  try {
+    return await promise;
+  } finally {
+    ttsInFlight.delete(cacheKey);
+  }
+}
+
+async function speakViaOpenAI(spokenText, words, voiceProfile, speed, onWord, onEnd, onLoading) {
+  const voiceKey = voiceProfile.OpenAIVoice || 'onyx';
+  const cacheKey = `${voiceKey}:${speed.toFixed(2)}:${spokenText}`;
+  const controller = new AbortController();
+  activeAbortController = controller;
+
+  let loadingTimer = null;
+  if (!ttsAudioCache.has(cacheKey) && onLoading) {
+    loadingTimer = setTimeout(() => {
+      if (!controller.signal.aborted) onLoading(true);
+    }, 220);
+  }
+
+  let audioUrl;
+  try {
+    audioUrl = await ensureOpenAiAudioUrl(spokenText, voiceProfile, speed);
+  } finally {
+    if (loadingTimer) clearTimeout(loadingTimer);
+    onLoading?.(false);
   }
 
   if (controller.signal.aborted) return;
@@ -801,6 +847,7 @@ function speakViaBrowser(spokenText, words, voiceProfile, speed, onWord, onEnd) 
 
 let activeRecognition = null;
 let recognitionShouldRun = false;
+let recognitionRestartTimer = null;
 let accumulatedFinalTranscript = '';
 let mediaRecorder = null;
 let recordedChunks = [];
@@ -813,6 +860,10 @@ export function isSpeechRecognitionSupported() {
 
 export function stopListening() {
   recognitionShouldRun = false;
+  if (recognitionRestartTimer) {
+    clearTimeout(recognitionRestartTimer);
+    recognitionRestartTimer = null;
+  }
   if (activeRecognition) {
     try {
       activeRecognition.onend = null;
@@ -832,6 +883,20 @@ export function stopListening() {
     mediaRecorder = null;
   }
   recordedChunks = [];
+}
+
+// Merge new final segment without duplicating cumulative phrases emitted on Android Chrome
+function appendFinalSegmentSafely(existing, nextSegment) {
+  const prev = String(existing || '').trim();
+  const next = String(nextSegment || '').trim();
+  if (!next) return prev;
+  if (!prev) return next;
+  const prevLower = prev.toLowerCase();
+  const nextLower = next.toLowerCase();
+  if (nextLower === prevLower) return prev;
+  if (nextLower.startsWith(prevLower)) return next;
+  if (prevLower.endsWith(nextLower)) return prev;
+  return `${prev} ${next}`.trim();
 }
 
 // Starts listening to the actor's microphone and streams interim & final transcripts
@@ -856,7 +921,7 @@ export function startListening({
       rec.continuous = true;
       rec.interimResults = true;
       rec.lang = 'en-US';
-      rec.maxAlternatives = 3;
+      rec.maxAlternatives = 4;
 
       rec.onstart = () => {
         onStatusChange?.('listening');
@@ -866,11 +931,15 @@ export function startListening({
         let interim = '';
         for (let i = event.resultIndex; i < event.results.length; i++) {
           const res = event.results[i];
-          const transcript = res[0]?.transcript || '';
+          const alts = [];
+          for (let k = 0; k < res.length; k++) {
+            if (res[k]?.transcript) alts.push(res[k].transcript);
+          }
+          const chosen = pickBestAlternativeForScript(alts, expectedScriptPrompt);
           if (res.isFinal) {
-            accumulatedFinalTranscript = `${accumulatedFinalTranscript} ${transcript}`.trim();
+            accumulatedFinalTranscript = appendFinalSegmentSafely(accumulatedFinalTranscript, chosen);
           } else {
-            interim = `${interim} ${transcript}`.trim();
+            interim = `${interim} ${chosen}`.trim();
           }
         }
         const combined = `${accumulatedFinalTranscript} ${interim}`.trim();
@@ -883,7 +952,7 @@ export function startListening({
         if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
           recognitionShouldRun = false;
           onStatusChange?.('blocked');
-          onError?.('Microphone permission was blocked. Tap the mic icon or use On-Screen Tap/Hold mode.');
+          onError?.('Microphone permission was blocked. Tap the mic icon or use “✓ Delivered Cue”.');
         } else if (event.error !== 'no-speech' && event.error !== 'aborted') {
           onStatusChange?.('warning');
         }
@@ -891,9 +960,13 @@ export function startListening({
 
       rec.onend = () => {
         if (recognitionShouldRun) {
-          try {
-            rec.start();
-          } catch (e) {}
+          clearTimeout(recognitionRestartTimer);
+          recognitionRestartTimer = setTimeout(() => {
+            if (!recognitionShouldRun || activeRecognition !== rec) return;
+            try {
+              rec.start();
+            } catch (e) {}
+          }, 140);
         } else {
           onStatusChange?.('idle');
         }
@@ -919,6 +992,14 @@ export function startListening({
   return false;
 }
 
+function whisperFilenameForMime(mime = '') {
+  const m = String(mime).toLowerCase();
+  if (m.includes('mp4') || m.includes('m4a') || m.includes('aac')) return 'rehearsal.mp4';
+  if (m.includes('ogg')) return 'rehearsal.ogg';
+  if (m.includes('wav')) return 'rehearsal.wav';
+  return 'rehearsal.webm';
+}
+
 async function startWhisperStream({ expectedScriptPrompt, onTranscript, onStatusChange, onError }) {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -935,14 +1016,17 @@ async function startWhisperStream({ expectedScriptPrompt, onTranscript, onStatus
     };
 
     mediaRecorder.start(1000);
+    let whisperBusy = false;
 
     whisperInterval = setInterval(async () => {
-      if (!recognitionShouldRun || !recordedChunks.length) return;
-      const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+      if (!recognitionShouldRun || whisperBusy || !recordedChunks.length) return;
+      const mimeType = mediaRecorder?.mimeType || 'audio/webm';
+      const blob = new Blob(recordedChunks, { type: mimeType });
       if (blob.size < 1800) return;
+      whisperBusy = true;
       try {
         const form = new FormData();
-        form.append('file', blob, 'rehearsal.webm');
+        form.append('file', blob, whisperFilenameForMime(mimeType));
         form.append('model', 'whisper-1');
         form.append('language', 'en');
         if (expectedScriptPrompt) {
@@ -959,7 +1043,9 @@ async function startWhisperStream({ expectedScriptPrompt, onTranscript, onStatus
             onTranscript?.(data.text.trim(), false);
           }
         }
-      } catch (e) {}
+      } catch (e) {} finally {
+        whisperBusy = false;
+      }
     }, 2400);
   } catch (e) {
     onStatusChange?.('blocked');

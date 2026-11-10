@@ -266,10 +266,90 @@ export function wordSimilarity(scriptTok, spokenTok, tolerance = TOLERANCE_LEVEL
 }
 
 // Detects if the actor just called out "Line!" or "Line please" to ask the
-// prompter for a hint.
+// prompter for a hint — works both at the start of a cue AND mid-monologue,
+// while avoiding false triggers when the script itself expects the word "line".
 export function isPromptCommand(transcript) {
   const cleaned = normalizeWord(transcript);
-  return cleaned === 'line' || cleaned === 'lineplease' || cleaned === 'prompt' || cleaned === 'hint';
+  return (
+    cleaned === 'line' ||
+    cleaned === 'lineplease' ||
+    cleaned === 'whatsmyline' ||
+    cleaned === 'prompt' ||
+    cleaned === 'hint'
+  );
+}
+
+export function detectSpokenPromptRequest(transcript, scriptText = '', currentActiveIndex = 0) {
+  const rawWords = String(transcript || '').trim().split(/\s+/).filter(Boolean);
+  if (!rawWords.length) return false;
+
+  const lastOne = normalizeWord(rawWords[rawWords.length - 1]);
+  const lastTwo = rawWords.length >= 2
+    ? normalizeWord(rawWords.slice(-2).join(''))
+    : '';
+
+  const matchedPromptPhrase =
+    lastTwo === 'lineplease' ||
+    lastTwo === 'whatsmyline' ||
+    lastTwo === 'promptme' ||
+    lastOne === 'line' ||
+    lastOne === 'prompt' ||
+    lastOne === 'hint';
+
+  if (!matchedPromptPhrase) return false;
+
+  // Unambiguous two-word prompter requests always trigger
+  if (lastTwo === 'lineplease' || lastTwo === 'whatsmyline' || lastTwo === 'promptme') {
+    return true;
+  }
+
+  // Check whether the script itself expects "line" / "prompt" / "hint" near the active word cursor
+  const scriptTokens = tokenizeLine(scriptText);
+  if (scriptTokens.length > 0) {
+    const winStart = Math.max(0, currentActiveIndex - 1);
+    const winEnd = Math.min(scriptTokens.length, currentActiveIndex + 4);
+    for (let i = winStart; i < winEnd; i++) {
+      if (scriptTokens[i].norm === lastOne) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+// Given up to N SpeechRecognition alternatives for a phrase, pick the hypothesis
+// whose words align best with the expected script speech (huge boost for Shakespearean/archaic diction).
+export function pickBestAlternativeForScript(alternatives = [], expectedScript = '') {
+  const valid = (alternatives || []).map((s) => String(s || '').trim()).filter(Boolean);
+  if (valid.length <= 1 || !expectedScript) return valid[0] || '';
+
+  // If any alternative is an explicit "Line!" prompt callout, preserve primary hypothesis
+  if (isPromptCommand(valid[0])) return valid[0];
+
+  const scriptTokens = tokenizeLine(expectedScript);
+  if (!scriptTokens.length) return valid[0];
+  const scriptNormSet = new Set(scriptTokens.map((t) => t.norm));
+  const scriptCanonSet = new Set(scriptTokens.map((t) => t.canonical));
+  const scriptPhonSet = new Set(scriptTokens.map((t) => t.phonetic).filter(Boolean));
+
+  let bestText = valid[0];
+  let bestScore = -1;
+
+  for (let idx = 0; idx < valid.length; idx++) {
+    const candidate = valid[idx];
+    const toks = tokenizeLine(candidate);
+    let score = idx === 0 ? 0.15 : 0; // slight tie-breaker preference for top acoustic confidence
+    for (const tok of toks) {
+      if (scriptNormSet.has(tok.norm)) score += 1.0;
+      else if (scriptCanonSet.has(tok.canonical)) score += 0.9;
+      else if (tok.phonetic && scriptPhonSet.has(tok.phonetic)) score += 0.65;
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      bestText = candidate;
+    }
+  }
+  return bestText;
 }
 
 // Aligns a spoken transcript against a script line and returns rich karaoke
@@ -407,6 +487,10 @@ export function evaluateSpokenLine(scriptText, spokenTranscript, toleranceKey = 
   const shortLineMatch = totalCount <= 3 && matchedCount >= Math.max(1, Math.ceil(totalCount * tolerance.minOverallRatio));
 
   const isComplete = enoughOverall || enoughWithTail || shortLineMatch;
+  const isNearCompleteForPause =
+    !isComplete &&
+    (hitTail || progressRatio >= 0.85) &&
+    accuracy >= Math.max(0.35, tolerance.minOverallRatio - 0.14);
 
   return {
     tokens: scriptTokens.map((t, i) => ({
@@ -421,6 +505,7 @@ export function evaluateSpokenLine(scriptText, spokenTranscript, toleranceKey = 
     accuracy,
     progressRatio,
     hitTail,
+    isNearCompleteForPause,
     isComplete
   };
 }

@@ -497,7 +497,33 @@ export const EXTENDED_CATALOG = [
   { id: 'moliere-learned-ladies', title: 'The Learned Ladies', playwright: 'Molière', era: 'French Classics', year: '1672', genre: 'Comedy', roles: ['HENRIETTE', 'ARMANDE', 'TRISSOTIN', 'CHRYSALE'], hook: 'A pretentious poet charms a household of would-be savants while true love fights back.' },
 
   // George Bernard Shaw
-  { id: 'shaw-arms-and-man', title: 'Arms and the Man', playwright: 'George Bernard Shaw', era: 'Victorian & Edwardian', year: '1894', genre: 'Romantic Comedy', roles: ['RAINA', 'BLUNTSCHLI', 'SERGIUS', 'LOUKA'], hook: 'A pragmatic Swiss mercenary who carries chocolates instead of cartridges climbs into idealistic Raina’s bedroom.' },
+  {
+    id: 'shaw-arms-and-man',
+    title: 'Arms and the Man',
+    playwright: 'George Bernard Shaw',
+    era: 'Victorian & Edwardian',
+    year: '1894',
+    genre: 'Romantic Comedy',
+    summary: 'A pragmatic Swiss mercenary who carries chocolates instead of cartridges climbs into idealistic Raina’s bedroom.',
+    scenes: [
+      {
+        id: 'arms-act1',
+        title: 'Act I — The Chocolate Cream Soldier (Raina & Bluntschli)',
+        lines: [
+          { speaker: 'RAINA', text: 'Who’s there? Who’s that? Don’t try to hide yourself: I saw you move the curtain.' },
+          { speaker: 'BLUNTSCHLI', direction: 'Stepping into the candlelight', text: 'Don’t call out; or you’ll be shot. Be good; and no harm will happen to you.' },
+          { speaker: 'RAINA', text: 'Do you know that however afraid I may be, if my father enters this room you are a dead man?' },
+          { speaker: 'BLUNTSCHLI', text: 'Quite sure of it, young lady. That is why I have no intention of letting them catch me here without company. Keep your cloak on; it’s better than nothing.' },
+          { speaker: 'RAINA', text: 'Some soldiers, I know, are afraid to die.' },
+          { speaker: 'BLUNTSCHLI', text: 'All of them, dear lady, all of them, believe me. It is our duty to live as long as we can. Now, if you raise an alarm—' },
+          { speaker: 'RAINA', text: 'You will shoot me. How do you know that I am afraid to die?' },
+          { speaker: 'BLUNTSCHLI', text: 'Look at my pistol: there’s nothing in it! I’ve no ammunition. What use are cartridges in battle? I always carry chocolate instead; and I finished the last cake of that hours ago.' },
+          { speaker: 'RAINA', text: 'Chocolate! Do you stuff your pockets with sweets—like a schoolboy—even in the field?' },
+          { speaker: 'BLUNTSCHLI', text: 'Yes: isn’t it contemptible? Take these away from me; I am as helpless as a child after three days under fire without sleep.' }
+        ]
+      }
+    ]
+  },
   { id: 'shaw-major-barbara', title: 'Major Barbara', playwright: 'George Bernard Shaw', era: 'Victorian & Edwardian', year: '1905', genre: 'Drama of Ideas', roles: ['BARBARA', 'UNDERSHAFT', 'CUSINS', 'LADY BRITOMART'], hook: 'Salvation Army Major Barbara clashes with her millionaire munitions-maker father over poverty and morality.' },
   { id: 'shaw-candida', title: 'Candida', playwright: 'George Bernard Shaw', era: 'Victorian & Edwardian', year: '1894', genre: 'Comedy', roles: ['CANDIDA', 'MORELL', 'MARCHBANKS'], hook: 'Candida must choose between her confident clergyman husband and a passionate young romantic poet.' },
   { id: 'shaw-mrs-warren', title: 'Mrs. Warren’s Profession', playwright: 'George Bernard Shaw', era: 'Victorian & Edwardian', year: '1893', genre: 'Drama', roles: ['VIVIE WARREN', 'MRS WARREN', 'PRAED', 'CROFTS'], hook: 'Cambridge-educated Vivie confronts her mother over the source of the fortune that funded her independence.' },
@@ -506,12 +532,62 @@ export const EXTENDED_CATALOG = [
   { id: 'shaw-saint-joan', title: 'Saint Joan', playwright: 'George Bernard Shaw', era: 'Victorian & Edwardian', year: '1923', genre: 'Historical Tragedy', roles: ['JOAN', 'DAUPHIN', 'CAUCHON', 'DUNOIS'], hook: 'A country girl from Domrémy inspires armies and faces the Inquisition with unshakable conviction.' },
 
   // Elizabethan & Jacobean Contemporaries (Marlowe, Jonson, Webster, Middleton, Ford)
-  { id: 'marlowe-faustus', title: 'Doctor Faustus', playwright: 'Christopher Marlowe', era: 'Elizabethan & Jacobean', year: '1592', genre: 'Tragedy', roles: ['FAUSTUS', 'MEPHISTOPHILIS', 'GOOD ANGEL', ' WAGNER'], hook: 'Weary of mortal science, Doctor Faustus signs a twenty-four-year pact with Mephistophilis for boundless knowledge.' },
+  {
+    id: 'marlowe-faustus',
+    title: 'Doctor Faustus',
+    playwright: 'Christopher Marlowe',
+    era: 'Elizabethan & Jacobean',
+    year: '1592',
+    genre: 'Tragedy',
+    summary: 'Weary of mortal science, Doctor Faustus conjures Mephistophilis and bargains twenty-four years for boundless power.',
+    scenes: [
+      {
+        id: 'faustus-sc3',
+        title: 'Act I, Scene 3 — Conjuring Mephistophilis',
+        lines: [
+          { speaker: 'FAUSTUS', text: 'I charge thee to return, and change thy shape; thou art too ugly to attend on me. Go, and return an old Franciscan friar; that holy shape becomes a devil best.' },
+          { speaker: 'MEPHISTOPHILIS', direction: 'Returning', text: 'Now, Faustus, what wouldst thou have me do?' },
+          { speaker: 'FAUSTUS', text: 'I charge thee wait upon me whilst I live, to do whatever Faustus shall command, be it to make the moon drop from her sphere, or the ocean to overwhelm the world.' },
+          { speaker: 'MEPHISTOPHILIS', text: 'I am a servant to great Lucifer, and may not follow thee without his leave: no more than he commands must we perform.' },
+          { speaker: 'FAUSTUS', text: 'Did not he charge thee to appear to me?' },
+          { speaker: 'MEPHISTOPHILIS', text: 'No, I came hither of mine own accord. When we hear one rack the name of God, abjure the Scriptures and his Saviour Christ, we fly, in hope to get his glorious soul.' },
+          { speaker: 'FAUSTUS', text: 'Tell me what is that Lucifer thy lord, and how comes it then that thou art out of hell?' },
+          { speaker: 'MEPHISTOPHILIS', text: 'Why, this is hell, nor am I out of it: think’st thou that I, who saw the face of God, and tasted the eternal joys of heaven, am not tormented with ten thousand hells, in being depriv’d of everlasting bliss?' },
+          { speaker: 'FAUSTUS', text: 'What, is great Mephistophilis so passionate for being deprived of the joys of heaven? Learn thou of Faustus manly fortitude, and scorn those joys thou never shalt possess.' }
+        ]
+      }
+    ]
+  },
   { id: 'marlowe-tamburlaine', title: 'Tamburlaine the Great', playwright: 'Christopher Marlowe', era: 'Elizabethan & Jacobean', year: '1587', genre: 'Tragedy', roles: ['TAMBURLAINE', 'ZENOCRATE', 'THERIDAMAS'], hook: 'A Scythian shepherd rises by the might of his "high astounding terms" and sword to conquer empires.' },
   { id: 'marlowe-edward-ii', title: 'Edward II', playwright: 'Christopher Marlowe', era: 'Elizabethan & Jacobean', year: '1592', genre: 'History / Tragedy', roles: ['EDWARD II', 'GAVESTON', 'ISABELLA', 'MORTIMER'], hook: 'King Edward’s devotion to Piers Gaveston sparks a bitter rebellion among the English barons.' },
   { id: 'jonson-volpone', title: 'Volpone', playwright: 'Ben Jonson', era: 'Elizabethan & Jacobean', year: '1606', genre: 'City Comedy', roles: ['VOLPONE', 'MOSCA', 'CELIA', 'CORVINO'], hook: 'Venetian magnifico Volpone and his parasite Mosca feign a terminal illness to fleece greedy legacy-hunters.' },
   { id: 'jonson-alchemist', title: 'The Alchemist', playwright: 'Ben Jonson', era: 'Elizabethan & Jacobean', year: '1610', genre: 'Comedy', roles: ['SUBTLE', 'FACE', 'DOL COMMON', 'MAMMON'], hook: 'Three con artists turn a London townhouse into a bustling factory of alchemical delusions.' },
-  { id: 'webster-duchess-malfi', title: 'The Duchess of Malfi', playwright: 'John Webster', era: 'Elizabethan & Jacobean', year: '1614', genre: 'Jacobean Tragedy', roles: ['DUCHESS', 'ANTONIO', 'BOSOLA', 'FERDINAND'], hook: '"I am Duchess of Malfi still": a widowed noblewoman secretly weds her steward in defiance of her tyrannical brothers.' },
+  {
+    id: 'webster-duchess-malfi',
+    title: 'The Duchess of Malfi',
+    playwright: 'John Webster',
+    era: 'Elizabethan & Jacobean',
+    year: '1614',
+    genre: 'Jacobean Tragedy',
+    summary: '“I am Duchess of Malfi still”: a widowed noblewoman secretly weds her steward Antonio in defiance of her brothers.',
+    scenes: [
+      {
+        id: 'malfi-act1-wooing',
+        title: 'Act I, Scene 2 — The Wooing Scene (Duchess & Antonio)',
+        lines: [
+          { speaker: 'DUCHESS', text: 'Fie, fie, what’s all this? One of your eyes is blood-shot; use my ring to’t, they say ’tis very sovereign: ’twas my wedding-ring, and I did vow never to part with it but to my second husband.' },
+          { speaker: 'ANTONIO', text: 'You have parted with it now.' },
+          { speaker: 'DUCHESS', text: 'Yes, to help your eye-sight.' },
+          { speaker: 'ANTONIO', text: 'You have made me stark blind.' },
+          { speaker: 'DUCHESS', text: 'How?' },
+          { speaker: 'ANTONIO', text: 'There is a saucy and ambitious devil dancing in this circle.' },
+          { speaker: 'DUCHESS', text: 'Remove him. This goodly roof of yours is too low built; I cannot stand upright in’t nor discourse, without I raise it higher: raise yourself; or, if you please, my hand to help you: so!' },
+          { speaker: 'ANTONIO', text: 'Ambition, madam, is a great man’s madness, that is not kept in chains and close-pent rooms, but in fair lightsome lodgings.' },
+          { speaker: 'DUCHESS', text: 'The misery of us that are born great! We are forced to woo, because none dare woo us; make not your heart so dead a piece of flesh, to fear more than to love me. Sir, be confident: what is’t distracts you? This is flesh and blood, sir; ’tis not the figure cut in alabaster kneels at my husband’s tomb.' }
+        ]
+      }
+    ]
+  },
   { id: 'webster-white-devil', title: 'The White Devil', playwright: 'John Webster', era: 'Elizabethan & Jacobean', year: '1612', genre: 'Jacobean Tragedy', roles: ['VITTORIA COROMBONA', 'FLAMINEO', 'BRACHIANO'], hook: 'The brilliant Vittoria Corombona defends herself with blazing eloquence before an Italian court.' },
   { id: 'ford-tis-pity', title: '’Tis Pity She’s a Whore', playwright: 'John Ford', era: 'Elizabethan & Jacobean', year: '1633', genre: 'Caroline Tragedy', roles: ['ANNABELLA', 'GIOVANNI', 'VASQUES'], hook: 'Forbidden passion in Parma spirals toward a tragic banquet.' },
   { id: 'middleton-changeling', title: 'The Changeling', playwright: 'Thomas Middleton', era: 'Elizabethan & Jacobean', year: '1622', genre: 'Jacobean Tragedy', roles: ['BEATRICE-JOANNA', 'DE FLORES', 'ALSEMERO'], hook: 'Beatrice-Joanna hires the scarred servant De Flores for a crime, only to discover she has become the deed’s child.' },
@@ -533,14 +609,46 @@ export const EXTENDED_CATALOG = [
   { id: 'lope-fuenteovejuna', title: 'Fuenteovejuna', playwright: 'Lope de Vega', era: 'European Classics', year: '1619', genre: 'Spanish Golden Age', roles: ['LAURENCIA', 'FRONDOSO', 'ESTEBAN'], hook: 'Laurencia rallies an entire Spanish village to stand together against a tyrannical commander.' },
   { id: 'synge-playboy-western', title: 'The Playboy of the Western World', playwright: 'J.M. Synge', era: 'Victorian & Edwardian', year: '1907', genre: 'Irish Comedy', roles: ['CHRISTY MAHON', 'PEGEEN MIKE', 'WIDOW QUIN'], hook: 'Runaway Christy Mahon becomes the hero of a County Mayo pub with a tall tale—until his father walks through the door.' },
   { id: 'synge-riders-sea', title: 'Riders to the Sea', playwright: 'J.M. Synge', era: 'Victorian & Edwardian', year: '1904', genre: 'One-Act Tragedy', roles: ['MAURYA', 'BARTLEY', 'CATHLEEN', 'NORA'], hook: 'On the Aran Islands, aging mother Maurya confronts the relentless sea that has claimed her husband and sons.' },
-  { id: 'glaspell-trifles', title: 'Trifles', playwright: 'Susan Glaspell', era: 'Modern Realism', year: '1916', genre: 'Drama / Mystery', roles: ['MRS HALE', 'MRS PETERS', 'COUNTY ATTORNEY', 'SHERIFF'], hook: 'While the men search upstairs for clues to a farmhouse murder, two women read the truth in the "trifles" of the kitchen.' }
+  {
+    id: 'glaspell-trifles',
+    title: 'Trifles',
+    playwright: 'Susan Glaspell',
+    era: 'Modern Realism',
+    year: '1916',
+    genre: 'Drama / Mystery',
+    summary: 'While the men search upstairs for clues to a farmhouse murder, two women read the truth in the “trifles” of the kitchen.',
+    scenes: [
+      {
+        id: 'trifles-kitchen',
+        title: 'The Farmhouse Kitchen — The Canary & The Quilt (Mrs. Hale & Mrs. Peters)',
+        lines: [
+          { speaker: 'MRS HALE', direction: 'Examining the quilt', text: 'Mrs. Peters, look at this sewing! All the rest of it has been so nice and even. And look at this! It’s all over the place! Why, it looks as if she didn’t know what she was about!' },
+          { speaker: 'MRS PETERS', text: 'Oh, what are you doing, Mrs. Hale?' },
+          { speaker: 'MRS HALE', text: 'Just pulling out a stitch or two that’s not sewed very good. Bad sewing always made me fidgety.' },
+          { speaker: 'MRS PETERS', direction: 'Opening the bird-cage door', text: 'Look at this door. It’s broke. One hinge is pulled apart.' },
+          { speaker: 'MRS HALE', text: 'Looks as if someone must have been rough with it. Why, here’s a fancy little box—wait—there’s something wrapped up in this piece of silk.' },
+          { speaker: 'MRS PETERS', text: 'Why, it’s the bird! Somebody—wrung—its—neck.' },
+          { speaker: 'MRS HALE', text: 'Wright wouldn’t like the bird—a thing that sang. She used to sing. He killed that, too.' },
+          { speaker: 'MRS PETERS', direction: 'Whispering', text: 'We don’t know who killed the bird.' },
+          { speaker: 'MRS HALE', text: 'I knew John Wright. No, Wright wouldn’t make pretty work of a bird that sang. If there’d been years and years of nothing, then a bird to sing to you, it would be awful—still, after the bird was still.' },
+          { speaker: 'COUNTY ATTORNEY', direction: 'Entering from stairs', text: 'Well, ladies, have you decided whether she was going to quilt it or knot it?' },
+          { speaker: 'MRS HALE', direction: 'Hiding the box in her coat pocket', text: 'We call it—knot it, Mr. Henderson.' }
+        ]
+      }
+    ]
+  }
 ];
 
 // Build playable scenes for any entry in EXTENDED_CATALOG so every single play
 // in the library has full multi-character rehearsal dialogue ready immediately.
 export function hydrateCatalogPlay(entry) {
-  if (entry.scenes) return entry;
-  const [leadA = 'PROTAGONIST', leadB = 'CONFIDANTE', leadC = 'ANTAGONIST', leadD = 'CHORUS'] = entry.roles || [];
+  if (entry.scenes) {
+    return {
+      ...entry,
+      verbatim: !entry.custom && entry.studioScene !== true
+    };
+  }
+  const [leadA = 'PROTAGONIST', leadB = 'CONFIDANTE', leadC = 'ANTAGONIST', leadD = 'CHORUS'] = (entry.roles || []).map((r) => String(r).trim());
 
   const scenes = [
     {
@@ -577,6 +685,8 @@ export function hydrateCatalogPlay(entry) {
 
   return {
     ...entry,
+    verbatim: false,
+    studioScene: true,
     scenes
   };
 }

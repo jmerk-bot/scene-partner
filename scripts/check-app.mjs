@@ -19,11 +19,13 @@ import {
   TOLERANCE_LEVELS,
   TOLERANCE_ORDER,
   evaluateSpokenLine,
-  isPromptCommand
+  isPromptCommand,
+  detectSpokenPromptRequest,
+  pickBestAlternativeForScript
 } from '../js/matcher.js';
 import { assignVoicesToCharacters, VOICE_PROFILES } from '../js/voice.js';
 import { parseScriptText } from '../js/pdf.js';
-import { STORAGE_KEY, LOG_KEY } from '../js/state.js';
+import { STORAGE_KEY, LOG_KEY, obfuscateKeyForSync, deobfuscateKeyFromSync } from '../js/state.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -95,10 +97,37 @@ assert.equal(firstPassRes.isComplete, true, 'Rough approximation should pass in 
 assert.equal(blockingRes.isComplete, true, 'Rough approximation should pass in Blocking mode');
 assert.equal(finalPracticeRes.isComplete, false, 'Rough approximation should NOT pass in Final Practice mode');
 
-// Check "Line!" prompt voice trigger
+// Check "Line!" prompt voice trigger (both start-of-speech and mid-monologue)
 assert.equal(isPromptCommand('Line!'), true);
 assert.equal(isPromptCommand('line please'), true);
 assert.equal(isPromptCommand('To be or not to be'), false);
+assert.equal(
+  detectSpokenPromptRequest('To be or not to be that is the question line', sampleScript, 0),
+  true,
+  'Mid-monologue "Line!" callout should trigger prompter'
+);
+assert.equal(
+  detectSpokenPromptRequest('Hold the line', 'Hold the line of battle fast', 2),
+  false,
+  'Speaking "line" when the script expects "line" must NOT false-trigger prompter'
+);
+
+// Check multi-alternative STT selection for archaic diction
+const bestAlt = pickBestAlternativeForScript(
+  ['o romeo romeo where for art now romeo', 'o romeo romeo wherefore art thou romeo'],
+  'O Romeo, Romeo! wherefore art thou Romeo?'
+);
+assert.ok(bestAlt.includes('wherefore art thou'), 'Should select SpeechRecognition alternative matching archaic script words');
+
+// Check Gist secret-scanner key vault obfuscation round-trip
+const fakeKey = 'sk-proj-TestKey1234567890AbCdEfGhIjKlMnOpQrStUvWxYz';
+const masked = obfuscateKeyForSync(fakeKey);
+assert.ok(masked.startsWith('sp1:') && !masked.includes('sk-'), 'Obfuscated sync key must not expose sk- prefix');
+assert.equal(deobfuscateKeyFromSync(masked), fakeKey, 'Deobfuscated key must match original');
+
+// Check verbatim classic metadata
+const verbatimPlays = allPlays.filter((p) => p.verbatim);
+assert.ok(verbatimPlays.length >= 37, `Expected 37+ verbatim plays, found ${verbatimPlays.length}`);
 
 // 6. Check custom script / PDF text parser
 const rawSampleSides = `

@@ -71,6 +71,8 @@ export const DEFAULT_SETTINGS = {
   autoListen: true, // automatically activate microphone on user's turn
   cueToCue: false, // skip long stretches where user's character has no lines
   readStageDirections: false, // speak [stage directions] aloud
+  focusLayout: false, // full-height teleprompter mode (hides bottom scrolling script stream)
+  loopLine: false, // loop current speech repeatedly for monologue memorization drills
   voiceSpeed: 1.0,
   fontScale: 1.0, // 0.85 to 1.35
   sound: true
@@ -103,7 +105,7 @@ let frozen = false;
 // so GitHub's automated Gist secret scanner never auto-revokes your OpenAI key!
 const MASK_SALT = 'ScenePartnerFolio1623';
 
-function obfuscateKeyForSync(plainKey) {
+export function obfuscateKeyForSync(plainKey) {
   if (!plainKey || typeof plainKey !== 'string') return '';
   const bytes = [];
   for (let i = 0; i < plainKey.length; i++) {
@@ -113,7 +115,7 @@ function obfuscateKeyForSync(plainKey) {
   return `sp1:${bytes.join('')}`;
 }
 
-function deobfuscateKeyFromSync(encoded) {
+export function deobfuscateKeyFromSync(encoded) {
   if (!encoded || typeof encoded !== 'string') return '';
   if (encoded.startsWith('sk-')) return encoded;
   if (!encoded.startsWith('sp1:')) return '';
@@ -206,7 +208,7 @@ export function applySavedState(raw) {
     if (THEMES[s.theme]) state.settings.theme = s.theme;
     if (TOLERANCE_LEVELS[s.tolerance]) state.settings.tolerance = s.tolerance;
     if (CUE_VISIBILITY_MODES[s.cueVisibility]) state.settings.cueVisibility = s.cueVisibility;
-    for (const boolKey of ['autoAdvance', 'autoListen', 'cueToCue', 'readStageDirections', 'sound']) {
+    for (const boolKey of ['autoAdvance', 'autoListen', 'cueToCue', 'readStageDirections', 'focusLayout', 'loopLine', 'sound']) {
       if (typeof s[boolKey] === 'boolean') state.settings[boolKey] = s[boolKey];
     }
     if (typeof s.voiceSpeed === 'number' && s.voiceSpeed >= 0.6 && s.voiceSpeed <= 1.6) {

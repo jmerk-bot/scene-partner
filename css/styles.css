@@ -1616,3 +1616,201 @@ html[data-theme="modern"] .complete-line-btn {
     grid-template-columns: 1fr;
   }
 }
+
+/* ---------- Rehearsal UX & Library Enhancements ---------- */
+
+.resume-rehearsal-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.85rem 1.2rem;
+  margin-bottom: 1rem;
+  border-radius: var(--radius-md);
+  background: var(--bg-surface-elevated);
+  border: 1.5px solid var(--accent);
+  box-shadow: var(--shadow-card);
+  flex-wrap: wrap;
+}
+
+.resume-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.resume-eyebrow {
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  text-transform: uppercase;
+}
+
+.resume-copy strong {
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+}
+
+.resume-copy span {
+  font-size: 0.83rem;
+  color: var(--text-muted);
+}
+
+.resume-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.resume-cta-btn {
+  padding: 0.58rem 1.15rem;
+  font-size: 0.9rem;
+}
+
+.upload-actions-card.drag-over {
+  outline: 2.5px dashed var(--accent);
+  outline-offset: 4px;
+  background: var(--accent-soft);
+}
+
+.search-row-flex {
+  display: flex;
+  align-items: stretch;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+}
+
+.search-row-flex .search-box {
+  flex: 1 1 320px;
+}
+
+.verbatim-filter-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.55rem 0.95rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.play-card-meta-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.play-source-tag {
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 0.12rem 0.46rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+}
+
+.play-source-tag.verbatim-tag {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.play-source-tag.studio-tag {
+  color: var(--text-muted);
+  background: var(--bg-surface);
+}
+
+.play-source-tag.custom-tag {
+  background: rgba(52, 211, 153, 0.15);
+  color: var(--word-matched);
+  border-color: var(--word-matched);
+}
+
+.delete-play-btn {
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  border-radius: 6px;
+  padding: 0.12rem 0.35rem;
+  font-size: 0.76rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.delete-play-btn:hover {
+  border-color: #ef4444;
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.studio-scene-note {
+  margin-top: 0.55rem !important;
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface-elevated);
+  border: 1px dashed var(--border-strong);
+  font-size: 0.82rem !important;
+  color: var(--text-muted);
+}
+
+.inline-link-btn {
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font-weight: 700;
+  text-decoration: underline;
+  padding: 0 0.15rem;
+  cursor: pointer;
+  font-size: inherit;
+}
+
+.preceding-cue-strip {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  padding: 0.42rem 0.75rem;
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  border-left: 3px solid var(--gold);
+  font-size: 0.86rem;
+  color: var(--text-muted);
+  flex-wrap: wrap;
+}
+
+.cue-from-label {
+  font-weight: 700;
+  color: var(--text-main);
+  flex-shrink: 0;
+}
+
+.cue-from-quote {
+  font-family: var(--font-script);
+  font-style: italic;
+}
+
+/* Full-Height Across-the-Room Teleprompter Mode */
+.rehearsal-stage.is-focus-layout .karaoke-focus-deck {
+  flex: 1;
+  justify-content: space-between;
+  padding: 1.5rem 1.85rem;
+}
+
+.rehearsal-stage.is-focus-layout .karaoke-line-display {
+  max-height: none;
+  flex: 1;
+  font-size: calc(1.78rem * var(--script-scale));
+  line-height: 1.65;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 0.12em 0.18em;
+}
+
+.loop-line-btn.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.curtain-actions {
+  flex-wrap: wrap;
+  justify-content: center;
+}

@@ -741,7 +741,7 @@ function renderHeaderHtml() {
   return `
     <div class="header-inner">
       <button class="brand-btn" data-action="nav" data-value="library" title="All Scripts">
-        <span class="brand-icon" aria-hidden="true">🎭</span>
+        <img class="brand-logo" src="./icons/icon.svg" alt="" width="30" height="30">
         <span class="brand-title">Scene Partner</span>
       </button>
 

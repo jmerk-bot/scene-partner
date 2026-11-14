@@ -8,6 +8,7 @@ import {
   uiActions,
   setCharacterVoice,
   setSearchQuery,
+  setPlaywrightFilter,
   handleUploadedScriptFile,
   handleBackupFilePicked
 } from './ui.js';
@@ -25,6 +26,8 @@ document.addEventListener('change', (event) => {
   const target = event.target;
   if (target?.dataset?.charVoice) {
     setCharacterVoice(target.dataset.charVoice, target.value);
+  } else if (target?.id === 'playwright-select') {
+    setPlaywrightFilter(target.value);
   }
 });
 
@@ -35,11 +38,27 @@ document.addEventListener('input', (event) => {
   }
 });
 
-// Keyboard shortcuts for rehearsal on tablet/desktop:
-// Space = Play/Pause scene, L = "Line!" prompt, Enter / Right = Delivered Cue / Next,
-// Left = Prev Cue, F = Full Teleprompter view, R = Loop current cue
+// Keyboard shortcuts:
+// Escape = Close modal/drawer, Space = Play/Pause, L = "Line!" prompt,
+// Enter / Right = Advance cue, Left = Previous cue, F = Focus view, R = Loop speech
 document.addEventListener('keydown', (event) => {
   if (event.metaKey || event.ctrlKey || event.altKey) return;
+
+  if (event.key === 'Escape') {
+    const modalLayer = document.getElementById('modal-layer');
+    const drawerLayer = document.getElementById('settings-drawer');
+    if (modalLayer && !modalLayer.hidden) {
+      event.preventDefault();
+      uiActions['close-modal']();
+      return;
+    }
+    if (drawerLayer && !drawerLayer.hidden) {
+      event.preventDefault();
+      uiActions['close-settings']();
+      return;
+    }
+  }
+
   const tag = event.target?.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
 
@@ -58,7 +77,7 @@ document.addEventListener('keydown', (event) => {
       uiActions['toggle-setting']('loopLine');
     } else if (event.key === 'ArrowRight' || event.key === 'Enter') {
       event.preventDefault();
-      uiActions['finish-user-line']();
+      uiActions['advance-rehearsal']();
     } else if (event.key === 'ArrowLeft') {
       event.preventDefault();
       uiActions['step-line'](-1);
@@ -66,7 +85,7 @@ document.addEventListener('keydown', (event) => {
   }
 });
 
-// Drag-and-drop PDF / TXT script support on the Library upload card
+// Drag-and-drop PDF / TXT script support on the Library top card
 document.addEventListener('dragover', (event) => {
   const dropZone = event.target?.closest?.('#upload-drop-zone');
   if (!dropZone) return;

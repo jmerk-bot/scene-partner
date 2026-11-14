@@ -1,10 +1,10 @@
 // Complete UI & Rehearsal Controller for Scene Partner.
 //
-// Manages the three main views:
-//   1. Library & Script Upload (`state.screen === 'library'`)
-//   2. Casting, Voice Assignment & Scene Selection (`state.screen === 'setup'`)
-//   3. Karaoke Rehearsal Stage (`state.screen === 'rehearsal'`)
-// Plus the Green Room Settings & Cloud Sync drawer.
+// Streamlined around three calm, focused views:
+//   1. Script Library (`state.screen === 'library'`)
+//   2. Single-Card Scene & Role Setup (`state.screen === 'setup'`)
+//   3. Unified Karaoke Script Stage (`state.screen === 'rehearsal'`)
+// Plus a single-sheet Settings drawer.
 
 import {
   state,
@@ -52,10 +52,17 @@ import { cloudStatus, onCloudStatus, setCloudToken, clearCloudToken, syncWithClo
 
 const $ = (id) => document.getElementById(id);
 
+const QUICK_PLAYWRIGHTS = [
+  'William Shakespeare',
+  'Anton Chekhov',
+  'Oscar Wilde',
+  'Henrik Ibsen',
+  'Sophocles'
+];
+
 // Transient UI state (not persisted on every keystroke)
 let searchQuery = '';
 let selectedPlaywrightFilter = 'ALL';
-let verbatimOnlyFilter = false;
 let liveSpokenTranscript = '';
 let liveEvaluation = null;
 let partnerActiveWordIndex = -1;
@@ -63,7 +70,9 @@ let partnerAudioLoading = false;
 let micStatus = 'idle'; // 'idle' | 'listening' | 'blocked' | 'unsupported' | 'warning'
 let statusNotice = '';
 let settingsOpen = false;
-let settingsTab = 'rehearsal'; // 'rehearsal' | 'voices' | 'cloud'
+let setupVoicesOpen = false;
+let voiceSectionOpen = null; // null = auto-open only when unconfigured/error
+let cloudSectionOpen = false;
 let pasteModalOpen = false;
 let curtainModalOpen = false;
 let autoAdvanceTimer = null;
@@ -110,6 +119,9 @@ export function applyThemeToDom() {
   const theme = THEMES[state.settings.theme] ? state.settings.theme : 'shakespearean';
   document.documentElement.setAttribute('data-theme', theme);
   document.documentElement.style.setProperty('--script-scale', String(state.settings.fontScale || 1));
+  if (document.body) {
+    document.body.dataset.screen = state.screen;
+  }
   const metaTheme = document.getElementById('meta-theme-color');
   if (metaTheme) {
     metaTheme.setAttribute('content', THEME_META_COLORS[theme] || '#efe6d1');
@@ -159,11 +171,11 @@ export function selectPlay(playId) {
   if (!play) return;
   state.selectedPlayId = play.id;
   state.selectedSceneId = play.scenes[0]?.id || '';
-  // Default to the character with the most lines if current selection isn't in this play
   const validChars = state.selectedCharacters.filter((c) => play.characters.includes(c));
   state.selectedCharacters = validChars.length ? validChars : (play.characters[0] ? [play.characters[0]] : []);
   state.rehearsal.lineIndex = 0;
   state.rehearsal.lineStats = {};
+  setupVoicesOpen = false;
   state.screen = 'setup';
   saveState();
   renderApp();
@@ -213,7 +225,7 @@ export function previewCharacterVoice(charName) {
   const profile = voiceMap[charName] || VOICE_PROFILES[0];
   const sampleLine = play.scenes
     .flatMap((s) => s.lines)
-    .find((l) => l.speaker === charName)?.text || `Speak the speech, I pray you, as I pronounced it to you.`;
+    .find((l) => l.speaker === charName)?.text || 'Speak the speech, I pray you, as I pronounced it to you.';
   speakCharacterLine(sampleLine.slice(0, 140), profile, {
     speed: state.settings.voiceSpeed
   });
@@ -242,7 +254,7 @@ export function startSceneRehearsal(startFromBeginning = false) {
 function jumpToFirstCueWindow(scene) {
   const idx = scene.lines.findIndex((l) => isUserCharacter(l.speaker));
   if (idx > 1) {
-    state.rehearsal.lineIndex = idx - 1; // Start 1 line before the user's first cue
+    state.rehearsal.lineIndex = idx - 1;
   }
 }
 
@@ -284,12 +296,27 @@ export function stepLine(delta) {
   saveState();
   renderApp();
   if (wasPlaying) runCurrentLineTurn();
+  else scrollActiveLineIntoView();
+}
+
+export function advanceRehearsalStep() {
+  const scene = getActiveScene();
+  const currentLine = scene.lines[state.rehearsal.lineIndex];
+  if (!currentLine) return;
+  if (isUserCharacter(currentLine.speaker)) {
+    markUserLineDone();
+  } else if (state.rehearsal.lineIndex + 1 < scene.lines.length) {
+    stepLine(1);
+  } else {
+    finishSceneRehearsal();
+  }
 }
 
 export function jumpToLine(index) {
   const scene = getActiveScene();
   const idx = Number(index);
   if (!Number.isInteger(idx) || idx < 0 || idx >= scene.lines.length) return;
+  if (idx === state.rehearsal.lineIndex) return;
   const wasPlaying = state.rehearsal.playing;
   stopRehearsalPlayback();
   state.rehearsal.lineIndex = idx;
@@ -300,9 +327,10 @@ export function jumpToLine(index) {
   saveState();
   renderApp();
   if (wasPlaying) runCurrentLineTurn();
+  else scrollActiveLineIntoView();
 }
 
-// Prompt / "Line!" button: reveals & speaks the next few words of the actor's line
+// Prompt / "Line!" button: reveals & speaks the next 5 words of the actor's line
 export function requestLinePrompt() {
   const play = getActivePlay();
   const scene = getActiveScene(play);
@@ -310,7 +338,6 @@ export function requestLinePrompt() {
   if (!currentLine) return;
 
   const tokens = tokenizeLine(currentLine.text);
-  // Advance past whichever is further: spoken word cursor OR previously revealed hints
   let startWord = Math.max(
     liveEvaluation ? liveEvaluation.activeIndex : 0,
     state.rehearsal.revealedHints
@@ -325,7 +352,6 @@ export function requestLinePrompt() {
   stat.prompted = true;
   state.rehearsal.lineStats[state.rehearsal.lineIndex] = stat;
 
-  // Speak the prompt softly using the Stage Manager voice, then resume listening
   clearTimeout(pauseGraceTimer);
   stopListening();
   speakCharacterLine(promptSlice || currentLine.text.slice(0, 60), STAGE_DIRECTION_VOICE, {
@@ -355,7 +381,6 @@ function warmUpcomingPartnerLines(play, scene, fromIdx, voiceMap) {
   }
 }
 
-// Simulate speaking the rest of the current user line (useful in quiet spaces or when testing without a mic)
 export function markUserLineDone() {
   const scene = getActiveScene();
   const currentLine = scene.lines[state.rehearsal.lineIndex];
@@ -390,8 +415,7 @@ function runCurrentLineTurn() {
   liveSpokenTranscript = '';
   partnerActiveWordIndex = -1;
 
-  // Cue-to-Cue skip logic: if enabled, and neither this line nor the previous/next line belongs to the user,
-  // fast-forward to 1 line before the user's next cue.
+  // Cue-to-Cue skip logic: jump to 1 line before the user's next cue
   if (state.settings.cueToCue && !isUserCharacter(line.speaker)) {
     const nextUserIdx = scene.lines.findIndex((l, i) => i > idx && isUserCharacter(l.speaker));
     if (nextUserIdx !== -1 && nextUserIdx - idx > 1) {
@@ -405,8 +429,7 @@ function runCurrentLineTurn() {
   const voiceMap = assignVoicesToCharacters(play.characters, state.voiceOverrides);
   const userTurn = isUserCharacter(line.speaker);
 
-  // Warm the next upcoming partner speeches in the background while this turn plays
-  warmUpcomingPartnerLines(play, scene, userTurn ? idx + 1 : idx + 1, voiceMap);
+  warmUpcomingPartnerLines(play, scene, idx + 1, voiceMap);
 
   if (userTurn) {
     liveEvaluation = evaluateSpokenLine(line.text, '', state.settings.tolerance);
@@ -466,7 +489,6 @@ function beginActorTurnListening(line) {
       if (!state.rehearsal.playing) return;
       clearTimeout(pauseGraceTimer);
 
-      // Check if the actor called "Line!" or "Line please" (works at start OR mid-monologue)
       const currentCursor = liveEvaluation ? liveEvaluation.activeIndex : 0;
       if (detectSpokenPromptRequest(transcript, line.text, currentCursor)) {
         requestLinePrompt();
@@ -491,8 +513,6 @@ function beginActorTurnListening(line) {
           completeUserTurn(evalResult);
         }, 420);
       } else if (state.settings.autoAdvance && evalResult.isNearCompleteForPause) {
-        // Hands-free grace window: if actor reached the tail of the speech nearly within tolerance
-        // and pauses for 1.85s, advance smoothly without forcing them to walk over to tap the tablet.
         pauseGraceTimer = setTimeout(() => {
           if (state.rehearsal.playing && isUserCharacter(line.speaker)) {
             completeUserTurn(evalResult);
@@ -569,11 +589,10 @@ function finishSceneRehearsal() {
 }
 
 function scrollActiveLineIntoView() {
+  if (typeof requestAnimationFrame !== 'function') return;
   requestAnimationFrame(() => {
-    const activeEl = document.querySelector('.script-line-card.is-current');
-    if (activeEl) {
-      activeEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }
+    const activeEl = $('active-speech-card');
+    activeEl?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
   });
 }
 
@@ -603,7 +622,7 @@ export async function handleUploadedScriptFile(file) {
     });
 
     if (!parsedPlay.characters.length || !parsedPlay.scenes.length) {
-      statusNotice = 'Could not detect character cues in that file. Try pasting the script text or using CHARACTER: Line format.';
+      statusNotice = 'Could not detect character cues in that file. Try pasting the script text using CHARACTER: Line format.';
       renderApp();
       return;
     }
@@ -612,7 +631,7 @@ export async function handleUploadedScriptFile(file) {
     statusNotice = '';
     selectPlay(parsedPlay.id);
   } catch (e) {
-    statusNotice = `Could not parse "${file.name.slice(0, 80)}". You can also paste script sides directly.`;
+    statusNotice = `Could not parse "${file.name.slice(0, 80)}". Try pasting your script text instead.`;
     renderApp();
   }
 }
@@ -630,7 +649,7 @@ export function handlePastedScriptSubmit() {
   });
 
   if (!parsedPlay.characters.length) {
-    statusNotice = 'Tip: Put character names in ALL CAPS or follow them with a colon (e.g. HAMLET: To be, or not to be).';
+    statusNotice = 'Put character names in ALL CAPS or follow them with a colon (e.g. HAMLET: To be, or not to be).';
     renderApp();
     return;
   }
@@ -658,6 +677,14 @@ export function deleteCustomPlay(playId) {
 // ---------- Rendering ----------
 
 export function renderApp() {
+  // Preserve open/closed state of <details> disclosures across re-renders
+  const existingSetupVoices = $('setup-voices-details');
+  if (existingSetupVoices) setupVoicesOpen = existingSetupVoices.open;
+  const existingVoiceDetails = $('settings-voice-details');
+  if (existingVoiceDetails) voiceSectionOpen = existingVoiceDetails.open;
+  const existingCloudDetails = $('settings-cloud-details');
+  if (existingCloudDetails) cloudSectionOpen = existingCloudDetails.open;
+
   applyThemeToDom();
 
   const headerEl = $('app-header');
@@ -669,14 +696,17 @@ export function renderApp() {
   if (mainEl) {
     if (state.screen === 'library') mainEl.innerHTML = renderLibraryScreenHtml();
     else if (state.screen === 'setup') mainEl.innerHTML = renderSetupScreenHtml();
-    else mainEl.innerHTML = renderRehearsalScreenHtml();
+    else {
+      mainEl.innerHTML = renderRehearsalScreenHtml();
+      scrollActiveLineIntoView();
+    }
   }
 
   if (drawerEl) {
     drawerEl.hidden = !settingsOpen;
     if (settingsOpen) {
       drawerEl.innerHTML = renderSettingsDrawerHtml();
-      if (settingsTab === 'cloud') renderCloudStatusInDrawer();
+      renderCloudStatusInDrawer();
     }
   }
 
@@ -695,49 +725,29 @@ export function renderApp() {
 }
 
 function renderHeaderHtml() {
-  const play = getActivePlay();
-  const tol = TOLERANCE_LEVELS[state.settings.tolerance] || TOLERANCE_LEVELS['off-book'];
   const vStatus = voiceEngineStatus();
 
-  const themePills = THEME_ORDER.map((key) => {
-    const t = THEMES[key];
-    const active = state.settings.theme === key ? 'active' : '';
-    return `<button class="theme-pill ${active}" data-action="set-theme" data-value="${key}" title="${escHtml(t.desc)}">${escHtml(t.shortLabel)}</button>`;
-  }).join('');
-
-  const voiceBadgeHtml = vStatus.hasOpenAiKey
-    ? (vStatus.lastError && !vStatus.active
-        ? `<button class="tolerance-badge-btn voice-warn-pill" data-action="open-settings" data-value="voices" title="${escHtml(vStatus.lastError)}">⚠️ OpenAI Error (Check Key)</button>`
-        : `<button class="tolerance-badge-btn voice-ok-pill" data-action="open-settings" data-value="voices" title="Using OpenAI Neural Voices (${escHtml(vStatus.maskedKey)})">✨ OpenAI Neural Voice</button>`)
-    : `<button class="tolerance-badge-btn voice-offline-pill" data-action="open-settings" data-value="voices" title="Currently using basic browser offline voices. Tap to paste your OpenAI API key for studio voices!">🔈 Offline Voice · Tap to Add OpenAI Key</button>`;
+  let voiceChipHtml = '';
+  if (vStatus.hasOpenAiKey) {
+    if (vStatus.lastError && !vStatus.active) {
+      voiceChipHtml = `<button class="status-chip voice-warn" data-action="open-settings" data-value="voices" title="${escHtml(vStatus.lastError)}">⚠️ Voice Key</button>`;
+    } else {
+      voiceChipHtml = `<button class="status-chip voice-ok" data-action="open-settings" data-value="voices" title="OpenAI Neural Voices active (${escHtml(vStatus.maskedKey)})"><span class="status-dot"></span>Neural</button>`;
+    }
+  } else {
+    voiceChipHtml = `<button class="status-chip voice-offline" data-action="open-settings" data-value="voices" title="Using basic offline voices — tap to add OpenAI key">+ Neural Voice</button>`;
+  }
 
   return `
     <div class="header-inner">
-      <div class="brand-cluster">
-        <button class="brand-btn" data-action="nav" data-value="library" title="Script Library">
-          <span class="brand-icon" aria-hidden="true">🎭</span>
-          <span class="brand-text">
-            <span class="brand-title">Scene Partner</span>
-            <span class="brand-sub">${state.screen === 'library' ? '120+ Classic Plays & PDF Sides' : escHtml(play.title)}</span>
-          </span>
-        </button>
-        <nav class="screen-tabs" aria-label="Main navigation">
-          <button class="screen-tab ${state.screen === 'library' ? 'active' : ''}" data-action="nav" data-value="library">1. Script</button>
-          <button class="screen-tab ${state.screen === 'setup' ? 'active' : ''}" data-action="nav" data-value="setup">2. Cast &amp; Voices</button>
-          <button class="screen-tab ${state.screen === 'rehearsal' ? 'active' : ''}" data-action="nav" data-value="rehearsal">3. Rehearse</button>
-        </nav>
-      </div>
+      <button class="brand-btn" data-action="nav" data-value="library" title="All Scripts">
+        <span class="brand-icon" aria-hidden="true">🎭</span>
+        <span class="brand-title">Scene Partner</span>
+      </button>
 
       <div class="header-controls">
-        ${voiceBadgeHtml}
-        <div class="theme-switcher" role="group" aria-label="Stage view style">
-          ${themePills}
-        </div>
-        <button class="tolerance-badge-btn" data-action="open-settings" data-value="rehearsal" title="Line matching strictness">
-          <span class="tol-dot"></span>
-          <span>${escHtml(tol.shortLabel)}</span>
-        </button>
-        <button class="icon-btn" data-action="open-settings" data-value="rehearsal" aria-label="Settings &amp; Green Room">
+        ${voiceChipHtml}
+        <button class="icon-btn" data-action="open-settings" data-value="rehearsal" aria-label="Settings">
           ⚙️ <span class="hide-compact">Settings</span>
         </button>
       </div>
@@ -745,55 +755,65 @@ function renderHeaderHtml() {
   `;
 }
 
-// ---------- Screen 1: Script Library & PDF Upload ----------
+// ---------- Screen 1: Calm Script Library ----------
 
 function renderLibraryScreenHtml() {
   const allPlays = getAllPlays(state.customPlays);
   const activePlay = getActivePlay();
   const activeScene = getActiveScene(activePlay);
   const activeRoles = state.selectedCharacters.map(formatSpeakerName).join(', ');
-  const resumeLineNum = Math.min((state.rehearsal.lineIndex || 0) + 1, Math.max(1, activeScene.lines?.length || 1));
+  const hasProgress = (state.rehearsal.lineIndex || 0) > 0 || (state.rehearsal.totalLinesPracticed || 0) > 0;
 
-  const baseFiltered = verbatimOnlyFilter
-    ? allPlays.filter((p) => p.verbatim || p.custom)
-    : allPlays;
-
-  const playwrightGroups = groupPlaysByPlaywright(baseFiltered);
-  const playwrightNames = ['ALL', ...playwrightGroups.map((g) => g.playwright)];
-
+  const playwrightGroups = groupPlaysByPlaywright(allPlays);
   const q = searchQuery.trim().toLowerCase();
+
   const filteredGroups = playwrightGroups
-    .filter((g) => selectedPlaywrightFilter === 'ALL' || g.playwright === selectedPlaywrightFilter)
+    .filter((g) => {
+      if (selectedPlaywrightFilter === 'ALL') return true;
+      if (selectedPlaywrightFilter === 'CUSTOM') return g.plays.some((p) => p.custom);
+      return g.playwright === selectedPlaywrightFilter;
+    })
     .map((g) => ({
       ...g,
       plays: g.plays.filter((p) => {
+        if (selectedPlaywrightFilter === 'CUSTOM' && !p.custom) return false;
         if (!q) return true;
         return (
           p.title.toLowerCase().includes(q) ||
           p.playwright.toLowerCase().includes(q) ||
-          (p.genre && p.genre.toLowerCase().includes(q)) ||
           p.characters.some((c) => c.toLowerCase().includes(q))
         );
       })
     }))
     .filter((g) => g.plays.length > 0);
 
-  const filterChips = playwrightNames.map((name) => {
-    const count = name === 'ALL'
-      ? baseFiltered.length
-      : (playwrightGroups.find((g) => g.playwright === name)?.plays.length || 0);
-    const label = name === 'ALL' ? `All Playwrights (${count})` : `${name} (${count})`;
-    return `<button class="playwright-chip ${selectedPlaywrightFilter === name ? 'active' : ''}" data-action="filter-playwright" data-value="${escHtml(name)}">${escHtml(label)}</button>`;
-  }).join('');
+  // Clean quick pills for the top playwrights + a single dropdown for all 25+ playwrights
+  const quickPills = [
+    `<button class="filter-pill ${selectedPlaywrightFilter === 'ALL' ? 'active' : ''}" data-action="filter-playwright" data-value="ALL">All (${allPlays.length})</button>`,
+    state.customPlays.length
+      ? `<button class="filter-pill ${selectedPlaywrightFilter === 'CUSTOM' ? 'active' : ''}" data-action="filter-playwright" data-value="CUSTOM">Uploaded (${state.customPlays.length})</button>`
+      : '',
+    ...QUICK_PLAYWRIGHTS
+      .filter((name) => playwrightGroups.some((g) => g.playwright === name))
+      .map((name) => {
+        const shortLabel = name === 'William Shakespeare' ? 'Shakespeare' : name.split(' ').pop();
+        return `<button class="filter-pill ${selectedPlaywrightFilter === name ? 'active' : ''}" data-action="filter-playwright" data-value="${escHtml(name)}">${escHtml(shortLabel)}</button>`;
+      })
+  ].filter(Boolean).join('');
+
+  const selectOptions = [
+    `<option value="ALL" ${selectedPlaywrightFilter === 'ALL' ? 'selected' : ''}>All Playwrights (${allPlays.length})</option>`,
+    ...playwrightGroups.map((g) =>
+      `<option value="${escHtml(g.playwright)}" ${selectedPlaywrightFilter === g.playwright ? 'selected' : ''}>${escHtml(g.playwright)} (${g.plays.length})</option>`
+    )
+  ].join('');
 
   const sectionsHtml = filteredGroups.length
     ? filteredGroups.map((group) => `
       <section class="playwright-section">
         <div class="section-heading">
-          <div>
-            <h2>${escHtml(group.playwright)}</h2>
-            <p class="section-sub">${group.plays.length} ${group.plays.length === 1 ? 'play' : 'plays'} · ${escHtml(group.era)}</p>
-          </div>
+          <h2>${escHtml(group.playwright)}</h2>
+          <span class="section-sub">${escHtml(group.era)}</span>
         </div>
         <div class="play-grid">
           ${group.plays.map((p) => renderPlayCardHtml(p)).join('')}
@@ -802,63 +822,57 @@ function renderLibraryScreenHtml() {
     `).join('')
     : `<div class="empty-library">
          <p>No scripts matched “${escHtml(searchQuery)}”.</p>
-         <button class="secondary-btn" data-action="clear-search">Show All ${allPlays.length} Plays</button>
+         <button class="secondary-btn" data-action="clear-search">Show All Scripts</button>
        </div>`;
 
   return `
     <div class="library-container">
-      <section class="resume-rehearsal-bar" aria-label="Continue active rehearsal">
-        <div class="resume-copy">
-          <span class="resume-eyebrow">CURRENTLY ON YOUR MUSIC STAND</span>
-          <strong>${escHtml(activePlay.title)}</strong>
-          <span>${escHtml(activeScene.title)} · Playing <strong>${escHtml(activeRoles || 'Lead')}</strong> · Cue ${resumeLineNum} of ${activeScene.lines?.length || 1}</span>
-        </div>
-        <div class="resume-actions">
-          <button class="quiet-btn small" data-action="nav" data-value="setup">🎭 Cast &amp; Voices</button>
-          <button class="start-rehearsal-btn resume-cta-btn" data-action="resume-rehearsal">▶ Resume Rehearsal</button>
-        </div>
-      </section>
+      ${hasProgress ? `
+        <section class="resume-bar" aria-label="Continue active rehearsal">
+          <div class="resume-bar-text">
+            <span class="resume-dot"></span>
+            <span><strong>${escHtml(activePlay.title)}</strong> · ${escHtml(activeScene.title)} (${escHtml(activeRoles || 'Lead')})</span>
+          </div>
+          <div class="resume-bar-actions">
+            <button class="quiet-btn small" data-action="nav" data-value="setup">Setup</button>
+            <button class="primary-pill-btn small" data-action="resume-rehearsal">▶ Resume</button>
+          </div>
+        </section>
+      ` : ''}
 
-      <section class="hero-banner">
-        <div class="hero-copy">
-          <span class="eyebrow">OFF-BOOK REHEARSAL STUDIO</span>
-          <h1>Choose Your Script or Upload Sides</h1>
-          <p>Select from <strong>${allPlays.length} pre-loaded classics</strong> (including the Top 20 Shakespeare plays) or drag &amp; drop your own audition PDF. Pick your character(s), and let your AI scene partners read every other role with distinct voices while live karaoke transcription tracks your lines.</p>
-          ${statusNotice ? `<p class="status-banner">${escHtml(statusNotice)}</p>` : ''}
+      <section id="upload-drop-zone" class="library-top-card">
+        <div class="library-top-row">
+          <div>
+            <h1>Choose a Script</h1>
+            <p class="subtle-line">Pick a classic play below, or drop your own PDF / text sides.</p>
+          </div>
+          <div class="upload-btn-group">
+            <button class="secondary-btn" data-action="trigger-pdf-upload">📄 Upload PDF</button>
+            <button class="quiet-btn" data-action="open-paste-modal">✍️ Paste Sides</button>
+          </div>
         </div>
-        <div id="upload-drop-zone" class="upload-actions-card">
-          <button class="primary-upload-btn" data-action="trigger-pdf-upload">
-            <span class="upload-icon">📄</span>
-            <span>
-              <strong>Upload or Drop Script PDF / TXT</strong>
-              <small>Extracts scenes &amp; character cues privately on device</small>
-            </span>
-          </button>
-          <button class="secondary-upload-btn" data-action="open-paste-modal">
-            ✍️ Paste Audition Sides or Scene Text
-          </button>
-        </div>
-      </section>
 
-      <section class="library-toolbar">
-        <div class="search-row-flex">
+        ${statusNotice ? `<p class="status-banner">${escHtml(statusNotice)}</p>` : ''}
+
+        <div class="library-filter-row">
           <div class="search-box">
             <span class="search-icon" aria-hidden="true">🔍</span>
             <input
               id="library-search"
               type="search"
-              placeholder="Search by play title, playwright, or character (e.g. Hamlet, Juliet, Lady Bracknell, Chekhov)…"
+              placeholder="Search title, playwright, or character…"
               value="${escHtml(searchQuery)}"
               autocomplete="off"
             >
             ${searchQuery ? `<button class="clear-search-btn" data-action="clear-search" aria-label="Clear search">✕</button>` : ''}
           </div>
-          <button class="playwright-chip verbatim-filter-btn ${verbatimOnlyFilter ? 'active' : ''}" data-action="toggle-verbatim-only" title="Filter strictly to verbatim public-domain play scenes and your uploaded scripts">
-            📜 Verbatim Text Only
-          </button>
+          <select id="playwright-select" class="playwright-select" aria-label="Filter by playwright">
+            ${selectOptions}
+          </select>
         </div>
-        <div class="playwright-bar" role="tablist" aria-label="Filter by playwright">
-          ${filterChips}
+
+        <div class="quick-pills-row">
+          ${quickPills}
         </div>
       </section>
 
@@ -870,42 +884,29 @@ function renderLibraryScreenHtml() {
 function renderPlayCardHtml(play) {
   const isSelected = play.id === state.selectedPlayId;
   const topRoles = play.characters.slice(0, 4).map(formatSpeakerName).join(', ');
-  const sourceBadge = play.custom
-    ? `<span class="play-source-tag custom-tag">📄 Uploaded</span>`
-    : play.verbatim
-      ? `<span class="play-source-tag verbatim-tag" title="Canonical verbatim public-domain script text">📜 Verbatim</span>`
-      : `<span class="play-source-tag studio-tag" title="Playable studio rehearsal adaptation — upload or paste sides for your exact edition">🎭 Studio Scene</span>`;
 
   return `
     <article class="play-card ${isSelected ? 'selected' : ''}" data-action="select-play" data-value="${escHtml(play.id)}">
-      <div class="play-card-top">
-        <span class="play-genre">${escHtml(play.genre || 'Classic Drama')}</span>
-        <span class="play-card-meta-right">
-          ${sourceBadge}
-          ${play.year ? `<span class="play-year">${escHtml(play.year)}</span>` : ''}
-          ${play.custom ? `<button class="delete-play-btn" data-action="delete-custom-play" data-value="${escHtml(play.id)}" title="Delete uploaded script" aria-label="Delete ${escHtml(play.title)}">🗑️</button>` : ''}
-        </span>
+      <div class="play-card-head">
+        <h3 class="play-title">${escHtml(play.title)}</h3>
+        ${play.custom
+          ? `<button class="delete-play-btn" data-action="delete-custom-play" data-value="${escHtml(play.id)}" title="Delete uploaded script" aria-label="Delete ${escHtml(play.title)}">🗑️</button>`
+          : ''}
       </div>
-      <h3 class="play-title">${escHtml(play.title)}</h3>
-      <p class="play-author">${escHtml(play.playwright)}</p>
-      <p class="play-summary">${escHtml(play.summary || play.hook || '')}</p>
-      <div class="play-card-footer">
-        <span class="play-roles" title="Key roles">🎭 ${escHtml(topRoles)}</span>
-        <span class="play-choose-cta">${isSelected ? 'Selected ✓' : 'Select →'}</span>
-      </div>
+      <p class="play-author">${escHtml(play.playwright)}${play.year ? ` · ${escHtml(play.year)}` : ''}${play.custom ? ' · Uploaded' : ''}</p>
+      <p class="play-roles">${escHtml(topRoles)}</p>
     </article>
   `;
 }
 
-// ---------- Screen 2: Cast Roles, Scene Selection & Voice Assignment ----------
+// ---------- Screen 2: Single-Card Setup ----------
 
 function renderSetupScreenHtml() {
   const play = getActivePlay();
   const scene = getActiveScene(play);
   const voiceMap = assignVoicesToCharacters(play.characters, state.voiceOverrides);
-  const tol = TOLERANCE_LEVELS[state.settings.tolerance] || TOLERANCE_LEVELS['off-book'];
+  const activeTol = TOLERANCE_LEVELS[state.settings.tolerance] || TOLERANCE_LEVELS['off-book'];
 
-  // Count lines per character in the selected scene AND across the play
   const sceneCounts = Object.create(null);
   for (const l of scene.lines) {
     if (isSafeObjectKey(l.speaker)) {
@@ -913,109 +914,139 @@ function renderSetupScreenHtml() {
     }
   }
 
-  const sceneCards = play.scenes.map((sc) => {
+  const scenePills = play.scenes.map((sc) => {
     const active = sc.id === scene.id ? 'active' : '';
-    const speakers = Array.from(new Set(sc.lines.map((l) => l.speaker))).map(formatSpeakerName).join(', ');
     return `
-      <button class="scene-card ${active}" data-action="select-scene" data-value="${escHtml(sc.id)}">
-        <div class="scene-card-title">${escHtml(sc.title)}</div>
-        <div class="scene-card-meta">${sc.lines.length} speeches · ${escHtml(speakers)}</div>
+      <button class="scene-pill ${active}" data-action="select-scene" data-value="${escHtml(sc.id)}">
+        <strong>${escHtml(sc.title)}</strong>
+        <span>${sc.lines.length} cues</span>
       </button>
     `;
   }).join('');
 
-  const charRows = play.characters.map((charName) => {
+  const roleChips = play.characters.map((charName) => {
     const isMine = isUserCharacter(charName);
-    const assignedVoice = voiceMap[charName] || VOICE_PROFILES[0];
-    const inSceneCount = sceneCounts[charName] || 0;
-    const totalCount = play.characterLineCounts[charName] || 0;
-
-    const voiceOptions = VOICE_PROFILES.map((v) =>
-      `<option value="${v.id}" ${v.id === assignedVoice.id ? 'selected' : ''}>${escHtml(v.name)} — ${escHtml(v.archetype.split('·')[0].trim())}</option>`
-    ).join('');
-
+    const count = sceneCounts[charName] ?? play.characterLineCounts[charName] ?? 0;
     return `
-      <div class="character-cast-row ${isMine ? 'is-user-role' : 'is-partner-role'}">
-        <button class="role-toggle-btn ${isMine ? 'active' : ''}" data-action="toggle-char" data-value="${escHtml(charName)}">
-          <span class="role-check">${isMine ? '✓ MY ROLE' : 'SCENE PARTNER'}</span>
-          <span class="role-name">${escHtml(formatSpeakerName(charName))}</span>
-          <span class="role-counts">${inSceneCount} lines in scene · ${totalCount} in play</span>
-        </button>
+      <button class="role-chip ${isMine ? 'active' : ''}" data-action="toggle-char" data-value="${escHtml(charName)}">
+        <span class="role-chip-mark">${isMine ? '✓' : '+'}</span>
+        <span>${escHtml(formatSpeakerName(charName))}</span>
+        <small>${count}</small>
+      </button>
+    `;
+  }).join('');
 
-        <div class="role-voice-controls">
-          ${isMine ? `
-            <span class="user-mic-tag">🎙️ You read these lines into the microphone</span>
-          ` : `
-            <label class="voice-select-label">
-              <span class="voice-dot" style="background:${safeCssColor(assignedVoice.color)}"></span>
-              <select class="voice-select" data-char-voice="${escHtml(charName)}" aria-label="Voice for ${escHtml(charName)}">
-                ${voiceOptions}
-              </select>
-            </label>
-            <button class="quiet-btn small" data-action="preview-voice" data-value="${escHtml(charName)}" title="Preview voice">🔊 Hear</button>
-          `}
+  const partnerChars = play.characters.filter((c) => !isUserCharacter(c));
+  const partnerVoiceRows = partnerChars.map((charName) => {
+    const assigned = voiceMap[charName] || VOICE_PROFILES[0];
+    const opts = VOICE_PROFILES.map((v) =>
+      `<option value="${v.id}" ${v.id === assigned.id ? 'selected' : ''}>${escHtml(v.name)} — ${escHtml(v.archetype.split('·')[0].trim())}</option>`
+    ).join('');
+    return `
+      <div class="partner-voice-row">
+        <span class="partner-voice-name">
+          <span class="voice-dot" style="background:${safeCssColor(assigned.color)}"></span>
+          ${escHtml(formatSpeakerName(charName))}
+        </span>
+        <div class="partner-voice-actions">
+          <select class="voice-select" data-char-voice="${escHtml(charName)}" aria-label="Voice for ${escHtml(charName)}">
+            ${opts}
+          </select>
+          <button class="quiet-btn small" data-action="preview-voice" data-value="${escHtml(charName)}" title="Preview voice">🔊</button>
         </div>
       </div>
     `;
   }).join('');
 
-  const tolerancePills = TOLERANCE_ORDER.map((key) => {
+  const cueVisPills = Object.values(CUE_VISIBILITY_MODES).map((m) => {
+    const shortLabels = {
+      full: 'Show Words',
+      'first-words': 'First 3 Words',
+      'off-book-blind': 'Off-Book'
+    };
+    return `
+      <button class="seg-btn ${state.settings.cueVisibility === m.id ? 'active' : ''}" data-action="set-cue-vis" data-value="${m.id}">
+        ${escHtml(shortLabels[m.id] || m.label)}
+      </button>
+    `;
+  }).join('');
+
+  const tolPills = TOLERANCE_ORDER.map((key) => {
     const item = TOLERANCE_LEVELS[key];
     return `
-      <button class="tolerance-card ${state.settings.tolerance === key ? 'active' : ''}" data-action="set-tolerance" data-value="${key}">
-        <div class="tol-card-head">
-          <strong>${escHtml(item.label)}</strong>
-          <span class="tol-pct">${escHtml(item.badge)}</span>
-        </div>
-        <p>${escHtml(item.desc)}</p>
+      <button class="seg-btn ${state.settings.tolerance === key ? 'active' : ''}" data-action="set-tolerance" data-value="${key}">
+        ${escHtml(item.shortLabel)}
       </button>
     `;
   }).join('');
 
   return `
-    <div class="setup-container">
-      <div class="setup-header-card">
-        <div>
-          <span class="eyebrow">${escHtml(play.playwright)} · ${escHtml(play.year || '')} ${play.verbatim ? '· 📜 Verbatim Text' : (play.studioScene ? '· 🎭 Studio Rehearsal Scene' : '')}</span>
-          <h1>${escHtml(play.title)}</h1>
-          <p>${escHtml(play.summary || play.hook || '')}</p>
-          ${play.studioScene ? `<p class="studio-scene-note">Note: This catalog entry uses a studio rehearsal scene for character drill. Preparing a specific translation or cut? <button class="inline-link-btn" data-action="open-paste-modal">Paste your exact audition sides →</button></p>` : ''}
+    <div class="setup-wrap">
+      <div class="setup-card">
+        <div class="setup-card-nav">
+          <button class="quiet-btn small" data-action="nav" data-value="library">← All Scripts</button>
+          <span class="setup-author">${escHtml(play.playwright)}</span>
         </div>
-        <div class="setup-cta-col">
-          <button class="start-rehearsal-btn" data-action="start-rehearsal">
-            🎬 Start Rehearsal
-          </button>
-          <button class="quiet-btn" data-action="nav" data-value="library">← Choose Different Play</button>
-        </div>
-      </div>
 
-      <div class="setup-columns">
-        <section class="setup-panel">
-          <h2>1. Select Act / Scene</h2>
-          <p class="panel-note">Pick which scene to run, or toggle <strong>Cue-to-Cue</strong> to jump straight to your entrances.</p>
-          <div class="scene-list">${sceneCards}</div>
-          <div style="margin-top:0.85rem;">
-            ${renderToggleRow('cueToCue', 'Cue-to-Cue Mode', 'Skip long stretches where your selected character(s) have no lines')}
+        <h1 class="setup-title">${escHtml(play.title)}</h1>
+        ${play.studioScene ? `<p class="studio-note">Studio rehearsal cut · <button class="inline-link-btn" data-action="open-paste-modal">Paste your own script cut</button></p>` : ''}
+
+        ${play.scenes.length > 1 ? `
+          <div class="setup-group">
+            <label class="setup-label">Scene</label>
+            <div class="scene-pill-grid">${scenePills}</div>
           </div>
-        </section>
+        ` : `
+          <p class="single-scene-meta">${escHtml(scene.title)} · ${scene.lines.length} speeches</p>
+        `}
 
-        <section class="setup-panel">
-          <h2>2. Select Your Character(s) &amp; Partner Voices</h2>
-          <p class="panel-note">Tap one or more characters you want to play. Every unselected character will be read aloud in a unique, consistent voice.</p>
-          <div class="character-cast-list">${charRows}</div>
-        </section>
+        <div class="setup-group">
+          <label class="setup-label">Who are you playing?</label>
+          <div class="role-chip-grid">${roleChips}</div>
+
+          ${partnerChars.length ? `
+            <details id="setup-voices-details" class="subtle-disclosure" ${setupVoicesOpen ? 'open' : ''}>
+              <summary>Customize partner voices (${partnerChars.length})</summary>
+              <div class="partner-voice-list">${partnerVoiceRows}</div>
+            </details>
+          ` : ''}
+        </div>
+
+        <div class="setup-group">
+          <label class="setup-label">My Lines</label>
+          <div class="seg-row">${cueVisPills}</div>
+        </div>
+
+        <div class="setup-group">
+          <div class="setup-label-row">
+            <label class="setup-label">Line Matching</label>
+            <span class="setup-hint">${escHtml(activeTol.desc)}</span>
+          </div>
+          <div class="seg-row">${tolPills}</div>
+        </div>
+
+        <div class="setup-footer">
+          <button
+            type="button"
+            class="cue-skip-check ${state.settings.cueToCue ? 'active' : ''}"
+            data-action="toggle-cue-to-cue"
+            role="checkbox"
+            aria-checked="${state.settings.cueToCue ? 'true' : 'false'}"
+          >
+            <span class="mini-check-box" aria-hidden="true">${state.settings.cueToCue ? '✓' : ''}</span>
+            <span>Jump straight to my cues (Cue-to-Cue)</span>
+          </button>
+
+          <button class="start-rehearsal-btn full-cta" data-action="start-rehearsal">
+            Start Rehearsal ▶
+          </button>
+        </div>
       </div>
-
-      <section class="setup-panel tolerance-panel">
-        <h2>3. Line Matching Strictness (“First Pass” → “Final Practice”)</h2>
-        <p class="panel-note">Controls how much approximation, paraphrasing, or archaic contraction swapping the transcription engine allows before advancing to the next cue.</p>
-        <div class="tolerance-grid">${tolerancePills}</div>
-      </section>
     </div>
   `;
 }
 
-// ---------- Screen 3: Karaoke Rehearsal Stage ----------
+// ---------- Screen 3: Unified Karaoke Script Stage ----------
 
 function renderRehearsalScreenHtml() {
   const play = getActivePlay();
@@ -1025,137 +1056,130 @@ function renderRehearsalScreenHtml() {
   const currentLine = lines[currentIdx];
   const userTurn = currentLine ? isUserCharacter(currentLine.speaker) : false;
   const voiceMap = assignVoicesToCharacters(play.characters, state.voiceOverrides);
-  const tol = TOLERANCE_LEVELS[state.settings.tolerance] || TOLERANCE_LEVELS['off-book'];
+  const focusFull = Boolean(state.settings.focusLayout);
 
-  const cueVisButtons = Object.values(CUE_VISIBILITY_MODES).map((m) => `
-    <button class="vis-pill ${state.settings.cueVisibility === m.id ? 'active' : ''}" data-action="set-cue-vis" data-value="${m.id}" title="${escHtml(m.desc)}">
+  const visShort = [
+    { id: 'full', label: 'Show' },
+    { id: 'first-words', label: 'First 3' },
+    { id: 'off-book-blind', label: 'Off-Book' }
+  ];
+  const cueVisButtons = visShort.map((m) => `
+    <button class="vis-pill ${state.settings.cueVisibility === m.id ? 'active' : ''}" data-action="set-cue-vis" data-value="${m.id}">
       ${escHtml(m.label)}
     </button>
   `).join('');
 
-  const scriptFeedHtml = lines.map((line, idx) =>
-    renderScriptLineCardHtml(line, idx, currentIdx, voiceMap)
+  const scriptSpeechesHtml = lines.map((line, idx) =>
+    renderStageSpeechHtml(line, idx, currentIdx, voiceMap)
   ).join('');
-
-  const prevLine = currentIdx > 0 ? lines[currentIdx - 1] : null;
-  const focusFull = Boolean(state.settings.focusLayout);
 
   return `
     <div class="rehearsal-stage ${focusFull ? 'is-focus-layout' : ''}">
-      <!-- Top Stage Bar -->
       <div class="stage-topbar">
         <div class="stage-meta">
-          <button class="quiet-btn small" data-action="nav" data-value="setup">← Cast &amp; Scenes</button>
+          <button class="quiet-btn small" data-action="nav" data-value="setup">← Setup</button>
           <div class="stage-titles">
             <strong>${escHtml(play.title)}</strong>
-            <span>${escHtml(scene.title)} · Speech ${currentIdx + 1} of ${lines.length}</span>
+            <span>${escHtml(scene.title)} · ${currentIdx + 1} / ${lines.length}</span>
           </div>
         </div>
 
-        <div class="stage-vis-group" role="group" aria-label="Line visibility mode">
-          ${cueVisButtons}
-          <button class="vis-pill layout-pill ${focusFull ? 'active' : ''}" data-action="toggle-setting" data-value="focusLayout" title="Expand karaoke teleprompter to full height for across-the-room tablet reading">
-            ${focusFull ? '☷ Show Script Stream' : '⛶ Full Teleprompter'}
-          </button>
-        </div>
-
-        <div id="mic-status-slot" class="mic-status-slot">
-          ${renderMicBadgeHtml(userTurn)}
+        <div class="stage-right-cluster">
+          <div class="stage-vis-group" role="group" aria-label="My line visibility">
+            ${cueVisButtons}
+          </div>
+          <div id="mic-status-slot" class="mic-status-slot">
+            ${renderMicBadgeHtml(userTurn, currentLine, voiceMap)}
+          </div>
         </div>
       </div>
 
-      <!-- Center Karaoke Teleprompter Focus Deck -->
-      <section id="karaoke-focus-deck" class="karaoke-focus-deck ${userTurn ? 'user-turn' : 'partner-turn'}">
-        ${renderKaraokeFocusInnerHtml(currentLine, currentIdx, userTurn, voiceMap, tol, prevLine)}
+      <section id="rehearsal-script-stage" class="script-stage-canvas" aria-label="Scene script">
+        ${scriptSpeechesHtml}
       </section>
 
-      <!-- Scrolling Full Script Context View -->
-      ${focusFull ? '' : `
-        <section class="script-scroll-stream" aria-label="Full scene script">
-          ${scriptFeedHtml}
-        </section>
-      `}
-
-      <!-- Bottom Rehearsal Transport Controls -->
       <footer class="rehearsal-transport">
-        <div class="transport-left">
-          <button class="transport-btn" data-action="step-line" data-value="-1" ${currentIdx === 0 ? 'disabled' : ''}>⏮ Prev Cue</button>
-          <button class="transport-btn play-pause-btn ${state.rehearsal.playing ? 'is-playing' : ''}" data-action="toggle-play">
-            ${state.rehearsal.playing ? '⏸ Pause Scene' : '▶ Run Scene'}
-          </button>
-          <button class="transport-btn" data-action="step-line" data-value="1" ${currentIdx >= lines.length - 1 ? 'disabled' : ''}>Next Cue ⏭</button>
-        </div>
+        <button class="transport-btn" data-action="step-line" data-value="-1" ${currentIdx === 0 ? 'disabled' : ''}>
+          ⏮ Back
+        </button>
 
-        <div class="transport-center">
-          <button class="prompt-line-btn" data-action="prompt-line" title="Ask the prompter to highlight and speak the next 5 words (or say 'Line!')">
-            💡 “Line!” (Prompt Me)
-          </button>
-          <button class="quiet-btn loop-line-btn ${state.settings.loopLine ? 'active' : ''}" data-action="toggle-setting" data-value="loopLine" title="Repeat this single speech on loop for monologue memorization">
-            ${state.settings.loopLine ? '🔂 Looping Cue' : '🔁 Loop Cue'}
-          </button>
-          ${userTurn ? `
-            <button class="complete-line-btn" data-action="finish-user-line" title="Mark this speech complete and cue the next character">
-              ✓ Delivered Cue →
-            </button>
-          ` : `
-            <button class="quiet-btn" data-action="replay-partner-line" title="Hear your scene partner read this line again">
-              🔊 Replay Partner
-            </button>
-          `}
-        </div>
+        <button class="transport-btn play-pause-btn" data-action="toggle-play">
+          ${state.rehearsal.playing ? '⏸ Pause' : '▶ Play'}
+        </button>
 
-        <div class="transport-right">
-          <button class="font-btn" data-action="font-scale" data-value="-0.1" title="Smaller script text">A−</button>
-          <button class="font-btn" data-action="font-scale" data-value="0.1" title="Larger script text">A+</button>
-        </div>
+        ${userTurn ? `
+          <button class="transport-btn prompt-line-btn" data-action="prompt-line" title="Reveal and speak the next 5 words (or say 'Line!' aloud)">
+            💡 Line!
+          </button>
+        ` : `
+          <button class="transport-btn" data-action="replay-partner-line" title="Replay partner speech">
+            🔊 Replay
+          </button>
+        `}
+
+        <button class="transport-btn next-action-btn" data-action="advance-rehearsal">
+          ${userTurn ? 'Done →' : 'Skip →'}
+        </button>
       </footer>
     </div>
   `;
 }
 
-function renderMicBadgeHtml(userTurn) {
-  if (!state.rehearsal.playing) {
-    return `<span class="mic-pill paused">⏸ Paused</span>`;
-  }
-  if (!userTurn) {
-    if (partnerAudioLoading) {
-      return `<span class="mic-pill partner">⏳ Cueing Neural Voice…</span>`;
-    }
-    return `<span class="mic-pill partner">🔊 Scene Partner Speaking…</span>`;
-  }
-  if (micStatus === 'listening') {
-    return `<span class="mic-pill listening"><span class="pulse-dot"></span> 🎙️ Listening for Your Cue…</span>`;
-  }
-  if (micStatus === 'blocked' || micStatus === 'unsupported') {
-    return `<span class="mic-pill blocked">🎙️ Mic Off — Use “✓ Delivered Cue”</span>`;
-  }
-  return `<span class="mic-pill ready">🎙️ Your Turn</span>`;
-}
+function renderStageSpeechHtml(line, idx, currentIdx, voiceMap) {
+  const isCurrent = idx === currentIdx;
+  const isPast = idx < currentIdx;
+  const isMine = isUserCharacter(line.speaker);
+  const profile = voiceMap[line.speaker] || VOICE_PROFILES[0];
 
-function buildPrecedingCueSnippet(prevLine) {
-  if (!prevLine || !prevLine.text) return '';
-  const words = prevLine.text.trim().split(/\s+/);
-  const tail = words.length > 12 ? `…${words.slice(-12).join(' ')}` : prevLine.text.trim();
+  if (isCurrent) {
+    return `
+      <article
+        id="active-speech-card"
+        class="script-speech is-current ${isMine ? 'user-turn' : 'partner-turn'}"
+      >
+        <div class="speech-header">
+          <span class="speech-speaker" style="${!isMine ? `color:${safeCssColor(profile.color)}` : ''}">
+            ${escHtml(formatSpeakerName(line.speaker))}
+          </span>
+          ${isMine
+            ? '<span class="role-badge your-cue-badge">YOUR CUE</span>'
+            : `<span class="role-badge partner-cue-badge">${escHtml(profile.name)}</span>`}
+        </div>
+        ${line.direction ? `<div class="speech-direction">[${escHtml(line.direction)}]</div>` : ''}
+        <div id="active-karaoke-words" class="karaoke-line-display">
+          ${renderActiveWordsInnerHtml(line, isMine)}
+        </div>
+      </article>
+    `;
+  }
+
+  const maskUpcoming = isMine && !isPast && state.settings.cueVisibility === 'off-book-blind';
+
   return `
-    <div class="preceding-cue-strip">
-      <span class="cue-from-label">Cue from ${escHtml(formatSpeakerName(prevLine.speaker))}:</span>
-      <span class="cue-from-quote">“${escHtml(tail)}”</span>
-    </div>
+    <article
+      class="script-speech ${isPast ? 'is-past' : 'is-upcoming'} ${isMine ? 'is-mine' : 'is-partner'}"
+      data-action="jump-line"
+      data-value="${idx}"
+    >
+      <div class="speech-header">
+        <span class="speech-speaker" style="${!isMine ? `color:${safeCssColor(profile.color)}` : ''}">
+          ${escHtml(formatSpeakerName(line.speaker))}
+        </span>
+        ${isMine ? '<span class="mini-you-tag">YOU</span>' : ''}
+      </div>
+      ${line.direction ? `<div class="speech-direction">[${escHtml(line.direction)}]</div>` : ''}
+      <p class="speech-text ${maskUpcoming ? 'blurred-line' : ''}">${escHtml(line.text)}</p>
+    </article>
   `;
 }
 
-function renderKaraokeFocusInnerHtml(currentLine, currentIdx, userTurn, voiceMap, tol, prevLine = null) {
-  if (!currentLine) return `<p>End of scene.</p>`;
-
-  const profile = voiceMap[currentLine.speaker] || VOICE_PROFILES[0];
-  const tokens = tokenizeLine(currentLine.text);
+function renderActiveWordsInnerHtml(currentLine, userTurn) {
+  if (!currentLine) return '';
   const visMode = state.settings.cueVisibility;
-
-  let karaokeWordsHtml = '';
 
   if (userTurn) {
     const evalData = liveEvaluation || evaluateSpokenLine(currentLine.text, liveSpokenTranscript, state.settings.tolerance);
-    karaokeWordsHtml = evalData.tokens.map((tok, i) => {
+    return evalData.tokens.map((tok, i) => {
       const isHinted = i < state.rehearsal.revealedHints;
       let shouldMask = false;
       if (visMode === 'first-words' && i >= 3 && tok.state === 'upcoming' && !isHinted) {
@@ -1171,36 +1195,10 @@ function renderKaraokeFocusInnerHtml(currentLine, currentIdx, userTurn, voiceMap
       ].filter(Boolean).join(' ');
       return `<span class="${cls}">${escHtml(tok.display)}</span>`;
     }).join(' ');
-
-    const pct = Math.round((evalData.accuracy || 0) * 100);
-    return `
-      <div class="focus-header">
-        <div class="speaker-banner">
-          <span class="role-badge your-cue-badge">YOUR CUE</span>
-          <h2 class="focus-speaker">${escHtml(formatSpeakerName(currentLine.speaker))}</h2>
-          ${currentLine.direction ? `<span class="stage-direction-inline">[${escHtml(currentLine.direction)}]</span>` : ''}
-        </div>
-        <div class="accuracy-meter" title="Target accuracy for ${escHtml(tol.label)}: ${Math.round(tol.minOverallRatio * 100)}%">
-          <span class="meter-label">${escHtml(tol.shortLabel)} Match: <strong>${pct}%</strong></span>
-          <div class="meter-bar"><div class="meter-fill" style="width:${pct}%"></div></div>
-        </div>
-      </div>
-
-      ${prevLine ? buildPrecedingCueSnippet(prevLine) : ''}
-
-      <div class="karaoke-line-display">
-        ${karaokeWordsHtml}
-      </div>
-
-      <div class="live-transcript-bar">
-        <span class="transcript-label">🎙️ Heard:</span>
-        <span class="transcript-text">${liveSpokenTranscript ? `“${escHtml(liveSpokenTranscript)}”` : '<em>Speak your line aloud (or say “Line!” anytime for a 5-word prompt)…</em>'}</span>
-      </div>
-    `;
   }
 
-  // Partner's turn: highlight words as the TTS voice speaks them
-  karaokeWordsHtml = tokens.map((tok, i) => {
+  const tokens = tokenizeLine(currentLine.text);
+  return tokens.map((tok, i) => {
     const stateCls = partnerActiveWordIndex < 0
       ? ''
       : i < partnerActiveWordIndex
@@ -1210,86 +1208,50 @@ function renderKaraokeFocusInnerHtml(currentLine, currentIdx, userTurn, voiceMap
           : 'partner-upcoming';
     return `<span class="karaoke-word ${stateCls}">${escHtml(tok.display)}</span>`;
   }).join(' ');
-
-  return `
-    <div class="focus-header">
-      <div class="speaker-banner">
-        <span class="role-badge partner-cue-badge" style="border-color:${safeCssColor(profile.color)};color:${safeCssColor(profile.color)}">
-          🔊 ${escHtml(profile.name)} Voice
-        </span>
-        <h2 class="focus-speaker">${escHtml(formatSpeakerName(currentLine.speaker))}</h2>
-        ${currentLine.direction ? `<span class="stage-direction-inline">[${escHtml(currentLine.direction)}]</span>` : ''}
-      </div>
-      <div class="partner-archetype">${escHtml(profile.archetype)}</div>
-    </div>
-
-    <div class="karaoke-line-display partner-script-text">
-      ${karaokeWordsHtml}
-    </div>
-  `;
 }
 
-function renderScriptLineCardHtml(line, idx, currentIdx, voiceMap) {
-  const isCurrent = idx === currentIdx;
-  const isPast = idx < currentIdx;
-  const isMine = isUserCharacter(line.speaker);
-  const profile = voiceMap[line.speaker] || VOICE_PROFILES[0];
-  const stat = state.rehearsal.lineStats[idx];
-
-  const visMode = state.settings.cueVisibility;
-  const maskInScroll = isMine && !isPast && !isCurrent && visMode === 'off-book-blind';
-
-  return `
-    <article
-      class="script-line-card ${isCurrent ? 'is-current' : ''} ${isPast ? 'is-past' : ''} ${isMine ? 'is-mine' : 'is-partner'}"
-      data-action="jump-line"
-      data-value="${idx}"
-    >
-      <div class="line-card-header">
-        <span class="line-speaker" style="${!isMine ? `color:${safeCssColor(profile.color)}` : ''}">
-          ${escHtml(formatSpeakerName(line.speaker))}
-        </span>
-        <span class="line-badges">
-          ${isMine ? '<span class="mini-tag mine-tag">YOU</span>' : `<span class="mini-tag voice-tag">${escHtml(profile.name)}</span>`}
-          ${stat ? `<span class="mini-tag score-tag">${Math.round(stat.accuracy * 100)}%${stat.prompted ? ' · Prompted' : ''}</span>` : ''}
-        </span>
-      </div>
-      ${line.direction ? `<div class="line-direction">[${escHtml(line.direction)}]</div>` : ''}
-      <p class="line-text ${maskInScroll ? 'blurred-line' : ''}">${escHtml(line.text)}</p>
-    </article>
-  `;
+function renderMicBadgeHtml(userTurn, currentLine, voiceMap) {
+  if (!state.rehearsal.playing) {
+    return `<span class="mic-pill paused">⏸ Paused</span>`;
+  }
+  if (!userTurn) {
+    if (partnerAudioLoading) {
+      return `<span class="mic-pill partner">⏳ Loading…</span>`;
+    }
+    const speaker = currentLine ? formatSpeakerName(currentLine.speaker) : 'Partner';
+    return `<span class="mic-pill partner">🔊 ${escHtml(speaker)}</span>`;
+  }
+  if (micStatus === 'listening') {
+    return `<span class="mic-pill listening"><span class="pulse-dot"></span> Listening</span>`;
+  }
+  if (micStatus === 'blocked' || micStatus === 'unsupported') {
+    return `<span class="mic-pill blocked">Mic Off · Tap Done</span>`;
+  }
+  return `<span class="mic-pill ready">🎙️ Your Cue</span>`;
 }
 
 export function renderKaraokeFocusOnly() {
-  const deck = $('karaoke-focus-deck');
-  if (!deck) return;
-  const prevDisplay = deck.querySelector('.karaoke-line-display');
-  const prevScrollTop = prevDisplay ? prevDisplay.scrollTop : 0;
+  const wordsEl = $('active-karaoke-words');
+  if (!wordsEl) return;
 
   const play = getActivePlay();
   const scene = getActiveScene(play);
   const currentIdx = Math.min(Math.max(0, state.rehearsal.lineIndex), Math.max(0, scene.lines.length - 1));
   const currentLine = scene.lines[currentIdx];
-  const prevLine = currentIdx > 0 ? scene.lines[currentIdx - 1] : null;
-  const userTurn = currentLine ? isUserCharacter(currentLine.speaker) : false;
-  const voiceMap = assignVoicesToCharacters(play.characters, state.voiceOverrides);
-  const tol = TOLERANCE_LEVELS[state.settings.tolerance] || TOLERANCE_LEVELS['off-book'];
+  if (!currentLine) return;
 
-  deck.className = `karaoke-focus-deck ${userTurn ? 'user-turn' : 'partner-turn'}`;
-  deck.innerHTML = renderKaraokeFocusInnerHtml(currentLine, currentIdx, userTurn, voiceMap, tol, prevLine);
+  const userTurn = isUserCharacter(currentLine.speaker);
+  wordsEl.innerHTML = renderActiveWordsInnerHtml(currentLine, userTurn);
 
-  // Preserve scroll position inside long monologues and smoothly keep the active word in view
-  const nextDisplay = deck.querySelector('.karaoke-line-display');
-  if (nextDisplay) {
-    nextDisplay.scrollTop = prevScrollTop;
-    const activeWordEl = nextDisplay.querySelector('.word-active, .partner-active');
-    if (activeWordEl) {
-      const containerRect = nextDisplay.getBoundingClientRect();
-      const wordRect = activeWordEl.getBoundingClientRect();
-      if (wordRect.bottom > containerRect.bottom - 18 || wordRect.top < containerRect.top + 12) {
-        const offset = (wordRect.top - containerRect.top) - containerRect.height * 0.38;
-        nextDisplay.scrollBy({ top: offset, behavior: 'smooth' });
-      }
+  // Smoothly keep the active spoken word centered inside the unified script canvas during long monologues
+  const stageEl = $('rehearsal-script-stage');
+  const activeWordEl = wordsEl.querySelector('.word-active, .partner-active');
+  if (stageEl && activeWordEl) {
+    const stageRect = stageEl.getBoundingClientRect();
+    const wordRect = activeWordEl.getBoundingClientRect();
+    if (wordRect.bottom > stageRect.bottom - 36 || wordRect.top < stageRect.top + 28) {
+      const offset = (wordRect.top - stageRect.top) - stageRect.height * 0.42;
+      stageEl.scrollBy({ top: offset, behavior: 'smooth' });
     }
   }
   renderMicBadgeOnly();
@@ -1298,15 +1260,18 @@ export function renderKaraokeFocusOnly() {
 function renderMicBadgeOnly() {
   const slot = $('mic-status-slot');
   if (!slot) return;
-  const scene = getActiveScene();
+  const play = getActivePlay();
+  const scene = getActiveScene(play);
   const currentLine = scene.lines[state.rehearsal.lineIndex];
-  slot.innerHTML = renderMicBadgeHtml(currentLine ? isUserCharacter(currentLine.speaker) : false);
+  const voiceMap = assignVoicesToCharacters(play.characters, state.voiceOverrides);
+  slot.innerHTML = renderMicBadgeHtml(currentLine ? isUserCharacter(currentLine.speaker) : false, currentLine, voiceMap);
 }
 
-// ---------- Settings & Green Room Drawer ----------
+// ---------- Single-Page Settings Drawer ----------
 
-export function openSettingsDrawer(tabName = 'rehearsal') {
-  settingsTab = tabName || 'rehearsal';
+export function openSettingsDrawer(section = '') {
+  if (section === 'voices') voiceSectionOpen = true;
+  if (section === 'cloud') cloudSectionOpen = true;
   settingsOpen = true;
   renderApp();
 }
@@ -1317,165 +1282,141 @@ export function closeSettingsDrawer() {
 }
 
 function renderSettingsDrawerHtml() {
+  const status = voiceEngineStatus();
+  const activeTol = TOLERANCE_LEVELS[state.settings.tolerance] || TOLERANCE_LEVELS['off-book'];
+  const shouldOpenVoice = voiceSectionOpen !== null
+    ? voiceSectionOpen
+    : (!status.hasOpenAiKey || Boolean(status.lastError));
+
+  const themePills = THEME_ORDER.map((k) => {
+    const t = THEMES[k];
+    return `
+      <button class="seg-btn ${state.settings.theme === k ? 'active' : ''}" data-action="set-theme" data-value="${k}">
+        ${escHtml(t.shortLabel)}
+      </button>
+    `;
+  }).join('');
+
+  const tolPills = TOLERANCE_ORDER.map((k) => {
+    const t = TOLERANCE_LEVELS[k];
+    return `
+      <button class="seg-btn ${state.settings.tolerance === k ? 'active' : ''}" data-action="set-tolerance" data-value="${k}">
+        ${escHtml(t.shortLabel)}
+      </button>
+    `;
+  }).join('');
+
+  const speedPills = [0.85, 1.0, 1.15].map((spd) => `
+    <button class="seg-btn ${Math.abs(state.settings.voiceSpeed - spd) < 0.04 ? 'active' : ''}" data-action="set-voice-speed" data-value="${spd}">
+      ${spd}×
+    </button>
+  `).join('');
+
+  const voiceSummaryBadge = status.hasOpenAiKey
+    ? (status.lastError && !status.active ? '⚠️ Check Key' : '✨ OpenAI Active')
+    : 'Offline Voices';
+
   return `
     <div class="drawer-backdrop" data-action="close-settings"></div>
-    <aside class="drawer-panel" role="dialog" aria-label="Rehearsal &amp; Voice Settings">
+    <aside class="drawer-panel" role="dialog" aria-label="Settings">
       <div class="drawer-header">
-        <h2>Green Room &amp; Settings</h2>
+        <h2>Settings</h2>
         <button class="icon-btn" data-action="close-settings" aria-label="Close settings">✕</button>
       </div>
 
-      <div class="drawer-tabs">
-        <button class="drawer-tab ${settingsTab === 'rehearsal' ? 'active' : ''}" data-action="settings-tab" data-value="rehearsal">Rehearsal &amp; Display</button>
-        <button class="drawer-tab ${settingsTab === 'voices' ? 'active' : ''}" data-action="settings-tab" data-value="voices">Voice &amp; AI Engine</button>
-        <button class="drawer-tab ${settingsTab === 'cloud' ? 'active' : ''}" data-action="settings-tab" data-value="cloud">Cloud &amp; Backups</button>
-      </div>
-
       <div class="drawer-body">
-        ${settingsTab === 'rehearsal' ? renderRehearsalSettingsTabHtml() : ''}
-        ${settingsTab === 'voices' ? renderVoicesSettingsTabHtml() : ''}
-        ${settingsTab === 'cloud' ? renderCloudSettingsTabHtml() : ''}
+        <div class="settings-section">
+          <h3>Stage Theme</h3>
+          <div class="seg-row">${themePills}</div>
+
+          <div class="inline-controls-row">
+            <div class="inline-control-item">
+              <span>Text Size (${Math.round((state.settings.fontScale || 1) * 100)}%)</span>
+              <div class="mini-btn-pair">
+                <button class="quiet-btn small" data-action="font-scale" data-value="-0.1">A−</button>
+                <button class="quiet-btn small" data-action="font-scale" data-value="0.1">A+</button>
+              </div>
+            </div>
+            <div class="inline-control-item">
+              <span>Partner Speed</span>
+              <div class="seg-row compact-seg">${speedPills}</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <h3>Line Strictness</h3>
+          <div class="seg-row">${tolPills}</div>
+          <p class="settings-note" style="margin-top:0.45rem;margin-bottom:0;">${escHtml(activeTol.label)} — ${escHtml(activeTol.desc)}</p>
+        </div>
+
+        <div class="settings-section">
+          <h3>Rehearsal Flow</h3>
+          ${renderToggleRow('autoAdvance', 'Auto-advance on match', 'Cue the next speaker automatically as soon as your line lands')}
+          ${renderToggleRow('autoListen', 'Hands-free microphone', 'Listen automatically whenever it is your cue')}
+          ${renderToggleRow('cueToCue', 'Cue-to-Cue mode', 'Skip stretches where your character has no lines')}
+          ${renderToggleRow('loopLine', 'Loop current speech', 'Repeat the active cue on loop for monologue drill')}
+          ${renderToggleRow('focusLayout', 'Across-the-room focus', 'Show only the active speech in oversized type')}
+          ${renderToggleRow('readStageDirections', 'Read [stage directions]', 'Speak bracketed stage directions aloud')}
+          ${renderToggleRow('sound', 'Cue chimes', 'Soft tone when your turn starts')}
+        </div>
+
+        <details id="settings-voice-details" class="settings-disclosure" ${shouldOpenVoice ? 'open' : ''}>
+          <summary>
+            <span>Neural Voices (OpenAI)</span>
+            <span class="disclosure-pill">${escHtml(voiceSummaryBadge)}</span>
+          </summary>
+          <div class="disclosure-body">
+            <p class="settings-note">
+              ${status.hasOpenAiKey
+                ? `Connected (${escHtml(status.maskedKey)}${status.lastModelUsed ? ` · ${escHtml(status.lastModelUsed)}` : ''}).`
+                : 'Paste an OpenAI API key to upgrade all partner roles to natural studio voices.'}
+            </p>
+            ${status.lastError ? `<p class="error-note">${escHtml(status.lastError)}</p>` : ''}
+            <div class="api-key-row">
+              <input
+                id="openai-api-key"
+                class="cloud-input"
+                type="password"
+                placeholder="${status.hasOpenAiKey ? `Saved (${escHtml(status.maskedKey)}) — paste new sk-... key to replace` : 'Paste OpenAI key (sk-proj-...)'}"
+                autocomplete="off"
+                spellcheck="false"
+              >
+              <div class="cloud-actions">
+                <button class="primary-pill-btn small" data-action="save-openai-key">Save &amp; Test</button>
+                ${status.hasOpenAiKey ? `<button class="secondary-btn small" data-action="test-openai-key">🔊 Test</button>` : ''}
+                ${status.hasOpenAiKey ? `<button class="quiet-btn small" data-action="clear-openai-key">Disconnect</button>` : ''}
+              </div>
+            </div>
+          </div>
+        </details>
+
+        <details id="settings-cloud-details" class="settings-disclosure" ${cloudSectionOpen ? 'open' : ''}>
+          <summary>
+            <span>Cloud Sync &amp; Backups</span>
+            <span class="disclosure-pill">${cloudStatus().connected ? 'Synced' : 'Local'}</span>
+          </summary>
+          <div class="disclosure-body">
+            <p class="settings-note">Sync scripts, castings, and encrypted voice settings to a private GitHub Gist (<code>gist</code> scope).</p>
+            <div class="api-key-row">
+              <input id="cloud-token" class="cloud-input" type="password" placeholder="GitHub token (ghp_… or github_pat_…)" autocomplete="off" spellcheck="false">
+              <div class="cloud-actions">
+                <button class="secondary-btn small" data-action="cloud-save">Save &amp; Sync</button>
+                <button id="cloud-clear" class="quiet-btn small" data-action="cloud-clear" hidden>Disconnect</button>
+              </div>
+              <p id="cloud-status" class="cloud-status"></p>
+            </div>
+            <div class="cloud-actions" style="margin-top:0.6rem;">
+              <button class="quiet-btn small" data-action="backup-download">⬇ Export JSON</button>
+              <button class="quiet-btn small" data-action="backup-restore">⬆ Import JSON</button>
+            </div>
+            <p class="settings-note" style="margin-top:0.65rem;margin-bottom:0;">
+              ${state.rehearsal.completedScenes} scenes completed · ${state.rehearsal.totalLinesPracticed} cues · Best ${state.rehearsal.bestAccuracy || 0}%
+            </p>
+          </div>
+        </details>
       </div>
     </aside>
-  `;
-}
-
-function renderRehearsalSettingsTabHtml() {
-  const tolButtons = TOLERANCE_ORDER.map((k) => {
-    const t = TOLERANCE_LEVELS[k];
-    return `
-      <button class="setting-choice ${state.settings.tolerance === k ? 'active' : ''}" data-action="set-tolerance" data-value="${k}">
-        <strong>${escHtml(t.label)}</strong>
-        <span>${escHtml(t.badge)} — ${escHtml(t.desc)}</span>
-      </button>
-    `;
-  }).join('');
-
-  const themeButtons = THEME_ORDER.map((k) => {
-    const t = THEMES[k];
-    return `
-      <button class="setting-choice ${state.settings.theme === k ? 'active' : ''}" data-action="set-theme" data-value="${k}">
-        <strong>${escHtml(t.label)}</strong>
-        <span>${escHtml(t.desc)}</span>
-      </button>
-    `;
-  }).join('');
-
-  return `
-    <div class="settings-section">
-      <h3>Line Accuracy Tolerance</h3>
-      <p class="settings-note">Toggle how forgiving the transcription engine is from “First Pass” to “Final Practice”.</p>
-      <div class="choice-stack">${tolButtons}</div>
-    </div>
-
-    <div class="settings-section">
-      <h3>Karaoke Stage View</h3>
-      <div class="choice-stack">${themeButtons}</div>
-    </div>
-
-    <div class="settings-section">
-      <h3>Rehearsal Flow</h3>
-      ${renderToggleRow('autoAdvance', 'Auto-Advance on Line Completion', 'Immediately cue the next character once your line matches within tolerance')}
-      ${renderToggleRow('autoListen', 'Auto-Activate Microphone on Your Cue', 'Start live speech recognition automatically whenever it is your character’s turn')}
-      ${renderToggleRow('cueToCue', 'Cue-to-Cue Fast Forward', 'Skip scenes or exchanges where your character has no lines')}
-      ${renderToggleRow('readStageDirections', 'Read Stage Directions Aloud', 'Have the Stage Manager voice read [stage directions] before lines')}
-      ${renderToggleRow('sound', 'Stage Chimes &amp; Cue Tones', 'Play a soft musical cue chime when your turn begins')}
-    </div>
-  `;
-}
-
-function renderVoicesSettingsTabHtml() {
-  const status = voiceEngineStatus();
-  const play = getActivePlay();
-  const voiceMap = assignVoicesToCharacters(play.characters, state.voiceOverrides);
-
-  const castList = play.characters.map((charName) => {
-    const current = voiceMap[charName] || VOICE_PROFILES[0];
-    const opts = VOICE_PROFILES.map((v) =>
-      `<option value="${v.id}" ${v.id === current.id ? 'selected' : ''}>${escHtml(v.name)} (${escHtml(v.archetype)})</option>`
-    ).join('');
-    return `
-      <div class="voice-cast-item">
-        <span class="voice-cast-char">${escHtml(formatSpeakerName(charName))}</span>
-        <select class="voice-select" data-char-voice="${escHtml(charName)}">${opts}</select>
-        <button class="quiet-btn small" data-action="preview-voice" data-value="${escHtml(charName)}">🔊</button>
-      </div>
-    `;
-  }).join('');
-
-  return `
-    <div class="settings-section">
-      <h3>Voice &amp; Transcription Engine</h3>
-      <div class="engine-status-box">
-        <p><strong>Active Voice Engine:</strong> ${escHtml(status.ttsEngine)}</p>
-        ${status.hasOpenAiKey ? `<p><strong>Saved Key:</strong> <code>${escHtml(status.maskedKey)}</code> ${status.lastModelUsed ? `(Model: <code>${escHtml(status.lastModelUsed)}</code>)` : ''}</p>` : ''}
-        ${status.lastError ? `<p style="color:#ef4444;font-weight:700;">Diagnostic: ${escHtml(status.lastError)}</p>` : ''}
-        <p><strong>Transcription:</strong> ${escHtml(status.sttEngine)}</p>
-      </div>
-      <p class="settings-note">Note: Each site origin (e.g. <code>localhost</code> vs. <code>jmerk-bot.github.io</code>) has its own browser storage. If you added your OpenAI key on the OpenAI dashboard or on localhost, paste your <code>sk-...</code> key here on the live site (or sync via Cloud Backup, which encrypts it with AES-256-GCM using your GitHub token) to activate OpenAI Neural Voices.</p>
-      <div class="api-key-row">
-        <input
-          id="openai-api-key"
-          class="cloud-input"
-          type="password"
-          placeholder="${status.hasOpenAiKey ? `Saved (${escHtml(status.maskedKey)}) — paste new sk-... key to replace` : 'Paste your OpenAI Secret Key here (sk-proj-...)'}"
-          autocomplete="off"
-          spellcheck="false"
-        >
-        <div class="cloud-actions">
-          <button class="start-rehearsal-btn" style="padding:0.55rem 1.1rem;font-size:0.88rem;" data-action="save-openai-key">Save &amp; Test OpenAI Voice</button>
-          ${status.hasOpenAiKey ? `<button class="secondary-btn" data-action="test-openai-key">🔊 Test OpenAI Voice</button>` : ''}
-          ${status.hasOpenAiKey ? `<button class="quiet-btn" data-action="clear-openai-key">Disconnect Key</button>` : ''}
-        </div>
-      </div>
-    </div>
-
-    <div class="settings-section">
-      <h3>Scene Partner Reading Speed (${Math.round(state.settings.voiceSpeed * 100)}%)</h3>
-      <div class="speed-row">
-        ${[0.85, 0.95, 1.0, 1.1, 1.25].map((spd) => `
-          <button class="vis-pill ${Math.abs(state.settings.voiceSpeed - spd) < 0.03 ? 'active' : ''}" data-action="set-voice-speed" data-value="${spd}">
-            ${spd}×
-          </button>
-        `).join('')}
-      </div>
-    </div>
-
-    <div class="settings-section">
-      <h3>Character Voice Casting (${escHtml(play.title)})</h3>
-      <div class="voice-cast-stack">${castList}</div>
-    </div>
-  `;
-}
-
-function renderCloudSettingsTabHtml() {
-  return `
-    <div class="settings-section">
-      <h3>Cloud Backup (GitHub Gist)</h3>
-      <p class="settings-note">Uses the same private GitHub Gist connection pattern as Addy’s Math Lab (stored separately in <code>scene-partner-state.json</code> so both apps stay 100% independent). Enter a GitHub token with <code>gist</code> access.</p>
-      <div class="api-key-row">
-        <input id="cloud-token" class="cloud-input" type="password" placeholder="GitHub token (ghp_… or github_pat_…)" autocomplete="off" spellcheck="false">
-        <div class="cloud-actions">
-          <button class="secondary-btn" data-action="cloud-save">Save &amp; Sync</button>
-          <button id="cloud-clear" class="quiet-btn" data-action="cloud-clear" hidden>Disconnect</button>
-        </div>
-        <p id="cloud-status" class="cloud-status"></p>
-      </div>
-    </div>
-
-    <div class="settings-section">
-      <h3>Device Backup Copy</h3>
-      <p class="settings-note">Save your uploaded scripts, voice castings, and rehearsal history to a single JSON file, or restore from one.</p>
-      <div class="cloud-actions">
-        <button class="secondary-btn" data-action="backup-download">⬇ Download Backup</button>
-        <button class="quiet-btn" data-action="backup-restore">⬆ Restore from File</button>
-      </div>
-    </div>
-
-    <div class="settings-section">
-      <h3>Rehearsal Log</h3>
-      <p class="settings-note">${state.rehearsal.completedScenes} scenes completed · ${state.rehearsal.totalLinesPracticed} cues delivered · Best accuracy: ${state.rehearsal.bestAccuracy || 0}%</p>
-    </div>
   `;
 }
 
@@ -1493,7 +1434,7 @@ export function renderCloudStatusInDrawer() {
 
   statusEl.className = `cloud-status ${info.state}`;
   if (!info.connected) {
-    statusEl.textContent = 'Not connected — state is saved in localStorage on this tablet.';
+    statusEl.textContent = 'Saved locally on this device.';
     return;
   }
   const time = info.lastSyncAt ? new Date(info.lastSyncAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
@@ -1501,18 +1442,18 @@ export function renderCloudStatusInDrawer() {
   if (info.state === 'syncing' || info.state === 'error') {
     statusEl.textContent = info.message;
   } else {
-    statusEl.textContent = `Connected${time ? ` · Last synced ${time}` : ''}${gistTag}`;
+    statusEl.textContent = `Connected${time ? ` · Synced ${time}` : ''}${gistTag}`;
   }
 }
 
 onCloudStatus(() => {
-  if (settingsOpen && settingsTab === 'cloud') renderCloudStatusInDrawer();
+  if (settingsOpen) renderCloudStatusInDrawer();
 });
 
 onVoiceStatusChange(() => {
   const headerEl = $('app-header');
   if (headerEl) headerEl.innerHTML = renderHeaderHtml();
-  if (settingsOpen && settingsTab === 'voices') renderApp();
+  if (settingsOpen) renderApp();
 });
 
 function renderToggleRow(key, label, desc) {
@@ -1533,21 +1474,21 @@ function renderToggleRow(key, label, desc) {
 function renderPasteModalHtml() {
   return `
     <div class="modal-backdrop" data-action="close-modal"></div>
-    <div class="modal-card" role="dialog" aria-label="Paste Script or Audition Sides">
+    <div class="modal-card" role="dialog" aria-label="Paste Script Sides">
       <div class="modal-header">
-        <h2>Paste Script or Audition Sides</h2>
+        <h2>Paste Script Sides</h2>
         <button class="icon-btn" data-action="close-modal">✕</button>
       </div>
-      <p class="settings-note">Paste lines from any play or screenplay. Put character cues in <code>ALL CAPS</code> on their own line or followed by a colon (e.g. <code>JULIET: O Romeo, Romeo!</code>).</p>
+      <p class="settings-note">Put character names in <code>ALL CAPS</code> or before a colon (e.g. <code>JULIET: O Romeo, Romeo!</code>).</p>
       <div class="paste-form">
         <div class="paste-row">
-          <input id="paste-script-title" type="text" placeholder="Play or Scene Title (e.g. Audition Sides — Act II)" class="cloud-input">
+          <input id="paste-script-title" type="text" placeholder="Scene Title (e.g. Audition Sides)" class="cloud-input">
           <input id="paste-script-author" type="text" placeholder="Playwright (optional)" class="cloud-input">
         </div>
-        <textarea id="paste-script-body" rows="10" placeholder="ROMEO:&#10;But, soft! what light through yonder window breaks?&#10;&#10;JULIET:&#10;O Romeo, Romeo! wherefore art thou Romeo?"></textarea>
+        <textarea id="paste-script-body" rows="9" placeholder="ROMEO:&#10;But, soft! what light through yonder window breaks?&#10;&#10;JULIET:&#10;O Romeo, Romeo! wherefore art thou Romeo?"></textarea>
         <div class="modal-actions">
           <button class="quiet-btn" data-action="close-modal">Cancel</button>
-          <button class="start-rehearsal-btn" data-action="submit-pasted-script">Parse &amp; Cast Roles →</button>
+          <button class="start-rehearsal-btn" data-action="submit-pasted-script">Use Script →</button>
         </div>
       </div>
     </div>
@@ -1587,37 +1528,16 @@ function renderCurtainModalHtml() {
 
   return `
     <div class="modal-backdrop" data-action="close-modal"></div>
-    <div class="modal-card curtain-card" role="dialog" aria-label="Curtain Call">
-      <span class="eyebrow">👏 CURTAIN CALL</span>
-      <h2>Scene Complete!</h2>
-      <p class="curtain-sub">${escHtml(play.title)} · ${escHtml(scene.title)}</p>
-
-      <div class="curtain-stats">
-        <div class="stat-pill">
-          <strong>${avg}%</strong>
-          <span>Line Accuracy</span>
-        </div>
-        <div class="stat-pill">
-          <strong>${stats.length}</strong>
-          <span>Your Speeches</span>
-        </div>
-        <div class="stat-pill">
-          <strong>${promptedCount}</strong>
-          <span>“Line!” Prompts</span>
-        </div>
-      </div>
-
-      <p class="settings-note">
-        ${nextTol
-          ? `Rehearsed at <strong>${escHtml(tol.label)}</strong> strictness. Ready to tighten tolerance to <strong>${escHtml(nextTol.label)}</strong> for the next pass?`
-          : `Mastered at <strong>${escHtml(tol.label)}</strong> — our strictest word-perfect level!`}
-      </p>
+    <div class="modal-card curtain-card" role="dialog" aria-label="Scene Complete">
+      <span class="eyebrow">SCENE COMPLETE</span>
+      <h2>${avg}% Accuracy</h2>
+      <p class="curtain-sub">${escHtml(play.title)} · ${escHtml(scene.title)}${promptedCount ? ` · ${promptedCount} prompt${promptedCount === 1 ? '' : 's'}` : ' · Zero prompts'}</p>
 
       <div class="modal-actions curtain-actions">
-        <button class="quiet-btn" data-action="nav" data-value="setup">Change Scene / Roles</button>
-        ${weakestIdx >= 0 ? `<button class="secondary-btn" data-action="drill-weakest-line" data-value="${weakestIdx}">🎯 Drill Prompted / Shaky Cue</button>` : ''}
-        <button class="secondary-btn" data-action="replay-scene">🔁 Run Again (${escHtml(tol.shortLabel)})</button>
-        ${nextTol ? `<button class="start-rehearsal-btn" data-action="level-up-replay" data-value="${nextTol.id}">⬆ Tighten to ${escHtml(nextTol.shortLabel)} &amp; Run</button>` : ''}
+        <button class="quiet-btn" data-action="nav" data-value="setup">Setup</button>
+        ${weakestIdx >= 0 ? `<button class="secondary-btn" data-action="drill-weakest-line" data-value="${weakestIdx}">🎯 Drill Shaky Cue</button>` : ''}
+        <button class="secondary-btn" data-action="replay-scene">🔁 Run Again</button>
+        ${nextTol ? `<button class="start-rehearsal-btn" data-action="level-up-replay" data-value="${nextTol.id}">⬆ Try ${escHtml(nextTol.shortLabel)}</button>` : ''}
       </div>
     </div>
   `;
@@ -1667,10 +1587,6 @@ export const uiActions = {
   'nav': (val) => navigateTo(val),
   'select-play': (val) => selectPlay(val),
   'delete-custom-play': (val) => deleteCustomPlay(val),
-  'toggle-verbatim-only': () => {
-    verbatimOnlyFilter = !verbatimOnlyFilter;
-    renderApp();
-  },
   'select-scene': (val) => selectScene(val),
   'toggle-char': (val) => toggleCharacterSelection(val),
   'preview-voice': (val) => previewCharacterVoice(val),
@@ -1697,6 +1613,7 @@ export const uiActions = {
   },
   'toggle-play': () => togglePlayPauseRehearsal(),
   'step-line': (val) => stepLine(Number(val)),
+  'advance-rehearsal': () => advanceRehearsalStep(),
   'jump-line': (val) => jumpToLine(Number(val)),
   'prompt-line': () => requestLinePrompt(),
   'finish-user-line': () => markUserLineDone(),
@@ -1747,6 +1664,7 @@ export const uiActions = {
     state.settings.fontScale = Math.min(1.4, Math.max(0.8, Number((state.settings.fontScale + delta).toFixed(2))));
     saveState();
     applyThemeToDom();
+    if (settingsOpen) renderApp();
   },
   'filter-playwright': (val) => {
     selectedPlaywrightFilter = val || 'ALL';
@@ -1773,12 +1691,8 @@ export const uiActions = {
     renderApp();
   },
   'submit-pasted-script': () => handlePastedScriptSubmit(),
-  'open-settings': (tab) => openSettingsDrawer(tab || 'rehearsal'),
+  'open-settings': (section) => openSettingsDrawer(section || ''),
   'close-settings': () => closeSettingsDrawer(),
-  'settings-tab': (tab) => {
-    settingsTab = tab || 'rehearsal';
-    renderApp();
-  },
   'save-openai-key': async () => {
     const input = $('openai-api-key');
     const val = input?.value.trim() || '';
@@ -1828,10 +1742,14 @@ export const uiActions = {
   }
 };
 
+export function setPlaywrightFilter(val) {
+  selectedPlaywrightFilter = val || 'ALL';
+  renderApp();
+}
+
 export function setSearchQuery(val) {
   searchQuery = val || '';
   renderApp();
-  // Keep focus in search input after re-render
   const el = $('library-search');
   if (el) {
     el.focus();
